@@ -147,7 +147,7 @@ app.use((error, req, res, next) => {
 async function start() {
   if (config.nodeEnv === 'production' && config.sessionSecret.length < 32) throw new Error('SESSION_SECRET must be at least 32 characters in production.');
   await seedUsers(db);
-  const server = app.listen(config.port, () => console.log(`BalanceIT is listening on port ${config.port}`));
+  const server = app.listen(config.port, '0.0.0.0', () => console.log(`BalanceIT is listening on port ${config.port}`));
   const shutdown = () => server.close(() => { db.close(); process.exit(0); });
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
