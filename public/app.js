@@ -72,7 +72,7 @@ function renderLogin(errorMessage = '') {
   app.innerHTML = `
     <div class="login-page">
       <section class="login-art">
-        <div class="brand"><span class="brand-mark">B</span><div class="brand-name">Balance<span>IT</span></div></div>
+        <div class="brand"><img class="brand-logo" src="/balanceit-logo.png" alt="BalanceIT logo"><div class="brand-name">Balance<span>IT</span></div></div>
         <div class="login-art-copy">
           <span class="eyebrow">Shared living, made simple</span>
           <h1>Good house finances start here.</h1>
