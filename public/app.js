@@ -9,6 +9,20 @@ let memberCache = [];
 let notificationOpen = false;
 let currentRoute = 'dashboard';
 let toastTimer;
+let livePollBusy = false;
+const liveSnapshots = new Map();
+
+function liveSnapshot(route, data) {
+  if (route === 'dashboard') {
+    const { unreadNotifications, ...dashboard } = data;
+    return JSON.stringify(dashboard);
+  }
+  return JSON.stringify(data);
+}
+
+function rememberLiveSnapshot(route, data) {
+  liveSnapshots.set(route, liveSnapshot(route, data));
+}
 
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 const money = paise => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format((Number(paise) || 0) / 100);
@@ -129,6 +143,7 @@ function renderMemberRow(member) {
 
 async function renderDashboard() {
   const d = await api('/api/dashboard');
+  rememberLiveSnapshot('dashboard', d);
   const summaries = [
     ['Approved shared expenses', d.totalApprovedGroupPaise, '▤', 'Across all approved bills'],
     ['This month', d.currentMonthPaise, '◷', 'Approved shared spending'],
@@ -164,6 +179,7 @@ async function renderAddExpense() {
 
 async function renderApprovals() {
   const data = await api('/api/approvals');
+  rememberLiveSnapshot('approvals', data);
   const pending = data.pending.length ? `<div class="approval-grid">${data.pending.map(item => {
     const canVote = item.paid_by !== currentUser.id && !item.my_vote;
     const voted = item.my_vote ? `You have ${item.my_vote}d on this request.` : item.paid_by === currentUser.id ? 'You submitted this request and cannot vote on it.' : 'Your vote helps the household keep a clear record.';
@@ -197,6 +213,7 @@ async function renderExpenses(params) {
 
 async function renderSettlements() {
   const data = await api('/api/settlements');
+  rememberLiveSnapshot('settlements', data);
   const personalItems = new Map();
   for (const suggestion of data.suggestions.filter(s => s.payerId === currentUser.id || s.receiverId === currentUser.id)) {
     personalItems.set(`${suggestion.payerId}:${suggestion.receiverId}`, { ...suggestion, pending: null });
@@ -266,11 +283,12 @@ function renderProfile() {
     <div class="page-grid"><section class="card form-aside"><div class="member-ident" style="margin-bottom:20px">${initialsAvatar(currentUser.displayName)}<div><strong>${escapeHtml(currentUser.displayName)}</strong><small>@${escapeHtml(currentUser.username)}</small></div></div><h3>BalanceIT member</h3><p>Only the five configured members can access this household ledger. All expenses you submit are automatically recorded as paid by you.</p><button class="danger-button" data-action="logout">↪ Log out</button></section></div>`;
 }
 
-async function loadRoute() {
+async function loadRoute({ background = false } = {}) {
   const { route, params } = routeFromHash();
   currentRoute = route;
   if (!currentUser) return;
-  layout('<div class="card empty-state"><div class="empty-icon">…</div><h3>Loading your ledger</h3><p>Getting the latest household data.</p></div>', route);
+  const scrollPosition = window.scrollY;
+  if (!background) layout('<div class="card empty-state"><div class="empty-icon">…</div><h3>Loading your ledger</h3><p>Getting the latest household data.</p></div>', route);
   try {
     let content;
     switch (route) {
@@ -285,10 +303,14 @@ async function loadRoute() {
     }
     if (routeFromHash().route === route) {
       const page = document.getElementById('page-content');
-      if (page) page.innerHTML = content;
+      if (page) {
+        page.innerHTML = content;
+        if (background) window.scrollTo(0, scrollPosition);
+      }
     }
   } catch (error) {
-    if (!document.querySelector('.login-page')) {
+    if (background) liveSnapshots.set(route, null);
+    if (!background && !document.querySelector('.login-page')) {
       const page = document.getElementById('page-content');
       if (page) page.innerHTML = `<div class="card empty-state"><div class="empty-icon">!</div><h3>We couldn’t load this page</h3><p>${escapeHtml(error.message)}</p><button class="secondary-button" data-action="retry" style="margin-top:14px">Try again</button></div>`;
     }
@@ -414,7 +436,7 @@ app.addEventListener('submit', async event => {
         result = await api(`/api/settlements/${form.dataset.id}/confirm`, { method: 'POST', body: JSON.stringify({ amount }) });
       }
       form.closest('.modal-backdrop')?.remove();
-      await loadRoute();
+      await loadRoute({ background: true });
       showToast(result.message);
     } catch (error) { showToast(error.message, true); }
     return;
@@ -475,14 +497,14 @@ app.addEventListener('click', async event => {
     button.disabled = true;
     try {
       const result = await api(`/api/approvals/${button.dataset.id}/vote`, { method: 'POST', body: JSON.stringify({ vote: button.dataset.vote, reason }) });
+      await loadRoute({ background: true });
       showToast(result.status === 'approved' ? 'Expense approved and added to the ledger.' : result.status === 'rejected' ? 'Expense rejected and kept in the audit history.' : 'Your vote has been recorded.');
-      await loadRoute();
     } catch (error) { button.disabled = false; showToast(error.message, true); }
     return;
   }
   if (action === 'confirm-settlement') {
     button.disabled = true;
-    try { const result = await api(`/api/settlements/${button.dataset.id}/confirm`, { method: 'POST', body: '{}' }); showToast(result.message); await loadRoute(); }
+    try { const result = await api(`/api/settlements/${button.dataset.id}/confirm`, { method: 'POST', body: '{}' }); await loadRoute({ background: true }); showToast(result.message); }
     catch (error) { button.disabled = false; showToast(error.message, true); }
   }
 });
@@ -514,12 +536,25 @@ async function boot() {
   } catch (error) { renderLogin(error.message); }
 }
 setInterval(async () => {
-  if (!currentUser) return;
+  if (!currentUser || livePollBusy || document.hidden) return;
+  livePollBusy = true;
   try {
     const data = await api('/api/notifications');
     window.__unread = data.unread;
     updateUnreadBadge();
-    if (currentRoute === 'approvals' || currentRoute === 'dashboard' || (currentRoute === 'settlements' && !document.querySelector('.modal-backdrop'))) await loadRoute();
-  } catch {}
+    const route = currentRoute;
+    const endpoints = { dashboard: '/api/dashboard', approvals: '/api/approvals', settlements: '/api/settlements' };
+    if (endpoints[route] && !document.querySelector('.modal-backdrop')) {
+      const snapshot = await api(endpoints[route]);
+      const signature = liveSnapshot(route, snapshot);
+      const previous = liveSnapshots.get(route);
+      liveSnapshots.set(route, signature);
+      if ((previous === null || (previous !== undefined && previous !== signature)) && currentRoute === route) {
+        await loadRoute({ background: true });
+      }
+    }
+  } catch {} finally {
+    livePollBusy = false;
+  }
 }, 9000);
 boot();
