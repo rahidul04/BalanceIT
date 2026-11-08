@@ -24,7 +24,9 @@ async function api(path, options = {}) {
   const response = await fetch(path, { credentials: 'same-origin', ...options, headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) } });
   const contentType = response.headers.get('content-type') || '';
   const data = contentType.includes('application/json') ? await response.json() : await response.text();
-  if (response.status === 401) {
+  // A failed login is also a 401; preserve its specific server message instead of
+  // incorrectly telling the user that an existing session expired.
+  if (response.status === 401 && path !== '/api/auth/login') {
     currentUser = null;
     renderLogin();
     throw new Error('Your session has ended. Please log in again.');
