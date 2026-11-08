@@ -14,7 +14,7 @@ const members = Array.from({ length: 5 }, (_, index) => {
   return {
     username: process.env[`MEMBER_${n}_USERNAME`] || `member${n}`,
     password: process.env[`MEMBER_${n}_PASSWORD`] || '',
-    displayName: process.env[`MEMBER_${n}_NAME`] || `Roommate ${['One', 'Two', 'Three', 'Four', 'Five'][index]}`
+    displayName: process.env[`MEMBER_${n}_NAME`] || ['Rahidul', 'Bapan', 'Manojit', 'Hara', 'Wahid'][index]
   };
 });
 

@@ -4,7 +4,7 @@ const { openDatabase } = require('../src/db');
 const { allocateShares, parseRupeesToPaise } = require('../src/money');
 const service = require('../src/services');
 const bcrypt = require('bcryptjs');
-const { resetUsers } = require('../src/seed');
+const { resetUsers, seedUsers } = require('../src/seed');
 
 function fixture() {
   const db = openDatabase(':memory:');
@@ -160,4 +160,15 @@ test('credential reset updates the configured five accounts without replacing th
   assert.equal(users[0].username, 'newmember1');
   assert.equal(users[0].display_name, 'New Member 1');
   assert.equal(await bcrypt.compare(members[0].password, users[0].password_hash), true);
+});
+
+test('startup config sync updates existing display names without changing password hashes', async t => {
+  const db = fixture(); t.after(() => db.close());
+  const members = ['Rahidul', 'Bapan', 'Manojit', 'Hara', 'Wahid'].map((displayName, index) => ({
+    username: `member${index + 1}`, password: 'unchanged-password', displayName
+  }));
+  await seedUsers(db, members);
+  const rows = db.prepare('SELECT username,password_hash,display_name FROM users ORDER BY id').all();
+  assert.deepEqual(rows.map(row => row.display_name), members.map(member => member.displayName));
+  assert.deepEqual(rows.map(row => row.password_hash), Array(5).fill('test-hash'));
 });

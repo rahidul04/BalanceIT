@@ -15,6 +15,16 @@ async function seedUsers(db, members = config.members) {
     if (stored.length !== 5 || stored.some(name => !usernames.includes(name))) {
       throw new Error('Database already contains a different member set. This app supports exactly five configured users.');
     }
+    // Display-name changes are safe to sync at startup; keep credentials and ledger history untouched.
+    const findUser = db.prepare('SELECT id FROM users WHERE username=? COLLATE NOCASE');
+    const updateName = db.prepare('UPDATE users SET display_name=? WHERE id=?');
+    const syncNames = db.transaction(() => {
+      for (const member of members) {
+        const user = findUser.get(member.username);
+        updateName.run(member.displayName, user.id);
+      }
+    });
+    syncNames();
     return;
   }
   for (const member of members) {
