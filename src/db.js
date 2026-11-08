@@ -31,13 +31,17 @@ function openDatabase(filename) {
   db.pragma('foreign_keys = ON');
   db.pragma('journal_mode = WAL');
   db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime(\'now\')));');
-  const migration = path.join(__dirname, '..', 'migrations', '001_initial.sql');
-  const applied = db.prepare('SELECT 1 FROM schema_migrations WHERE version=1').get();
-  if (!applied) {
-    const sql = fs.readFileSync(migration, 'utf8');
+  const migrations = [
+    { version: 1, file: '001_initial.sql' },
+    { version: 2, file: '002_confirmed_settlement_amount.sql' }
+  ];
+  for (const migration of migrations) {
+    const applied = db.prepare('SELECT 1 FROM schema_migrations WHERE version=?').get(migration.version);
+    if (applied) continue;
+    const sql = fs.readFileSync(path.join(__dirname, '..', 'migrations', migration.file), 'utf8');
     const migrate = db.transaction(() => {
       db.exec(sql);
-      db.prepare('INSERT INTO schema_migrations(version) VALUES(1)').run();
+      db.prepare('INSERT INTO schema_migrations(version) VALUES(?)').run(migration.version);
     });
     migrate();
   }

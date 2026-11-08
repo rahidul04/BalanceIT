@@ -134,6 +134,41 @@ test('pending expenses do not affect totals and only confirmed settlements chang
   assert.equal(snapshot.members[1].netBalancePaise, 0);
 });
 
+test('receiver can mark a partial amount received immediately without an approval request', t => {
+  const db = fixture(); t.after(() => db.close());
+  const expense = submit(db, 1, { amountPaise: 10000 });
+  approve(db, expense);
+  const settlementId = service.recordReceivedSettlement(db, 1, {
+    payerId: 2, amountPaise: 2500, paymentDate: '2026-11-07', note: 'Partial transfer'
+  });
+  const settlement = db.prepare('SELECT * FROM settlements WHERE id=?').get(settlementId);
+  assert.equal(settlement.status, 'confirmed');
+  assert.equal(settlement.amount_paise, 2500);
+  assert.equal(settlement.confirmed_amount_paise, 2500);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM settlements WHERE status='pending_confirmation'").get().n, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM expense_votes WHERE expense_id=?").get(expense).n, 3);
+  const snapshot = service.financeSnapshot(db);
+  assert.equal(snapshot.members[0].netBalancePaise, 2500);
+  assert.equal(snapshot.members[1].netBalancePaise, -2500);
+});
+
+test('receiver can confirm a custom partial amount while preserving the requested amount', t => {
+  const db = fixture(); t.after(() => db.close());
+  const expense = submit(db, 1, { amountPaise: 10000 });
+  approve(db, expense);
+  const settlementId = service.createSettlement(db, 2, {
+    receiverId: 1, amountPaise: 5000, paymentDate: '2026-11-07'
+  });
+  const result = service.confirmSettlement(db, 1, settlementId, 3000);
+  const settlement = db.prepare('SELECT * FROM settlements WHERE id=?').get(settlementId);
+  assert.equal(settlement.amount_paise, 5000);
+  assert.equal(settlement.confirmed_amount_paise, 3000);
+  assert.equal(result.confirmedAmountPaise, 3000);
+  const snapshot = service.financeSnapshot(db);
+  assert.equal(snapshot.members[0].netBalancePaise, 2000);
+  assert.equal(snapshot.members[1].netBalancePaise, -2000);
+});
+
 test('a different member cannot confirm a settlement', t => {
   const db = fixture(); t.after(() => db.close());
   const expense = submit(db, 1);

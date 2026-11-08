@@ -39,7 +39,7 @@ For a fresh setup, configure the five usernames and passwords before the first s
 - Shared and personal expenses. Shared expenses split equally among selected participants; remainder paise go to the lowest member IDs first.
 - Four independent votes per expense. Three approvals approve, two rejections reject, submitters cannot vote, and a unique database constraint prevents repeat votes.
 - Pending expenses never affect the ledger. Personal expenses are approved and reported but excluded from shared fair shares and balances.
-- Backend paise calculations, all-time member balances, minimum-count transfers for the five-member balance set, receiver-confirmed settlements, notifications, filtering, monthly reports, and CSV export.
+- Backend paise calculations, all-time member balances, minimum-count transfers for the five-member balance set, payer-requested/receiver-confirmed payments, immediate received-payment records, notifications, filtering, monthly reports, and CSV export.
 - Responsive desktop sidebar and compact mobile navigation, light and dark appearance toggle, loading/empty/error feedback, and approval polling while the approvals page is open.
 
 ## Tests
@@ -69,15 +69,16 @@ All API responses and request bodies are JSON except CSV export. Every endpoint 
 | `GET /api/approvals` | Pending requests and recent approved/rejected decisions |
 | `POST /api/approvals/:id/vote` | Submit `{ "vote": "approved" }` or `{ "vote": "rejected", "reason": "optional" }` |
 | `GET /api/settlements` | Balances, recommended transfers, and settlement history |
-| `POST /api/settlements` | Record `{ receiverId, amount, paymentDate, note }`; authenticated member is the payer |
-| `POST /api/settlements/:id/confirm` | Confirm a pending transfer as its receiver |
+| `POST /api/settlements` | Request `{ receiverId, amount, paymentDate, note }`; authenticated member is the payer and the receiver must confirm |
+| `POST /api/settlements/received` | Record `{ payerId, amount, paymentDate, note }` as received immediately; authenticated member is the receiver |
+| `POST /api/settlements/:id/confirm` | Confirm a pending transfer as its receiver; optional `amount` allows partial confirmation |
 | `GET /api/notifications` | Current member's latest notifications and unread count |
 | `PATCH /api/notifications/:id/read` | Mark one notification read |
 | `PATCH /api/notifications/read-all` | Mark all current member notifications read |
 | `GET /api/reports?year=YYYY&month=MM` | Monthly spending, member report, categories, and settlement history |
 | `GET /api/reports/export.csv?year=YYYY&month=MM` | Download that report as CSV |
 
-The API validates dates, categories, types, amounts, membership, vote permissions, receiver identity, and current balances on the server. It uses parameterized SQL. `migrations/001_initial.sql` creates the normalized schema; applied migration versions are recorded in `schema_migrations`.
+The API validates dates, categories, types, amounts, membership, vote permissions, receiver identity, and current balances on the server. It uses parameterized SQL. Migrations `001_initial.sql` and `002_confirmed_settlement_amount.sql` create and extend the normalized schema; applied migration versions are recorded in `schema_migrations`.
 
 ## Deploy
 

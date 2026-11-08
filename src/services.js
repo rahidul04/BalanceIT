@@ -131,12 +131,14 @@ function financeSnapshot(db) {
     const member = balances.get(row.user_id);
     if (member) member.fairSharePaise += row.share_paise;
   }
-  const settlements = db.prepare("SELECT payer_id,receiver_id,amount_paise FROM settlements WHERE status='confirmed'").all();
+  const settlements = db.prepare(`SELECT payer_id,receiver_id,
+    COALESCE(confirmed_amount_paise,amount_paise) AS settled_amount_paise
+    FROM settlements WHERE status='confirmed'`).all();
   for (const row of settlements) {
     const payer = balances.get(row.payer_id);
     const receiver = balances.get(row.receiver_id);
-    if (payer) payer.netBalancePaise += row.amount_paise;
-    if (receiver) receiver.netBalancePaise -= row.amount_paise;
+    if (payer) payer.netBalancePaise += row.settled_amount_paise;
+    if (receiver) receiver.netBalancePaise -= row.settled_amount_paise;
   }
   for (const member of balances.values()) member.netBalancePaise += member.sharedPaidPaise - member.fairSharePaise;
   const approvedSharedPaise = rows.filter(row => row.expense_type === 'shared').reduce((sum, row) => sum + row.amount_paise, 0);
@@ -288,6 +290,8 @@ function createSettlement(db, actorId, body) {
   const receiver = snapshot.members.find(m => m.id === receiverId);
   if (!payer || !receiver || payer.netBalancePaise >= 0 || receiver.netBalancePaise <= 0) fail('This member pair has no outstanding settlement to record.', 409);
   if (amountPaise > Math.min(-payer.netBalancePaise, receiver.netBalancePaise)) fail('Payment exceeds the current outstanding amount between these balances.', 409);
+  const pending = db.prepare(`SELECT id FROM settlements WHERE payer_id=? AND receiver_id=? AND status='pending_confirmation'`).get(actorId, receiverId);
+  if (pending) fail('A payment request for this member is already waiting for confirmation.', 409);
   const tx = db.transaction(() => {
     const result = db.prepare(`INSERT INTO settlements(payer_id,receiver_id,amount_paise,payment_date,note,status) VALUES(?,?,?,?,?,'pending_confirmation')`)
       .run(actorId, receiverId, amountPaise, paymentDate, note);
@@ -298,23 +302,56 @@ function createSettlement(db, actorId, body) {
   return tx();
 }
 
-function confirmSettlement(db, actorId, settlementId) {
+function recordReceivedSettlement(db, actorId, body) {
+  const payerId = Number(body.payerId);
+  const amountPaise = Number(body.amountPaise);
+  const paymentDate = String(body.paymentDate || '');
+  const note = String(body.note || '').trim().slice(0, 250) || null;
+  if (!Number.isSafeInteger(amountPaise) || amountPaise <= 0) fail('Enter a valid positive amount received.');
+  if (!validDate(paymentDate)) fail('Choose a valid payment date.');
+  if (payerId === actorId) fail('A payment must come from another member.');
+  const snapshot = financeSnapshot(db);
+  const payer = snapshot.members.find(member => member.id === payerId);
+  const receiver = snapshot.members.find(member => member.id === actorId);
+  if (!payer || !receiver || payer.netBalancePaise >= 0 || receiver.netBalancePaise <= 0) fail('This member pair has no outstanding amount to receive.', 409);
+  if (amountPaise > Math.min(-payer.netBalancePaise, receiver.netBalancePaise)) fail('Received amount exceeds the current outstanding balance.', 409);
+  const pending = db.prepare(`SELECT id FROM settlements WHERE payer_id=? AND receiver_id=? AND status='pending_confirmation'`).get(payerId, actorId);
+  if (pending) fail('There is already a payment request from this member. Use its Received action to confirm the amount.', 409);
+
+  const tx = db.transaction(() => {
+    const result = db.prepare(`INSERT INTO settlements(payer_id,receiver_id,amount_paise,confirmed_amount_paise,payment_date,note,status,confirmed_at)
+      VALUES(?,?,?,?,?,?,'confirmed',datetime('now'))`).run(payerId, actorId, amountPaise, amountPaise, paymentDate, note);
+    const receiverName = db.prepare('SELECT display_name FROM users WHERE id=?').get(actorId).display_name;
+    const payerName = db.prepare('SELECT display_name FROM users WHERE id=?').get(payerId).display_name;
+    const settlementId = Number(result.lastInsertRowid);
+    notify(db, payerId, 'Payment marked received', `${receiverName} marked your payment as received.`, 'settlement', settlementId);
+    notify(db, actorId, 'Payment received', `Received a payment from ${payerName}.`, 'settlement', settlementId);
+    return settlementId;
+  });
+  return tx();
+}
+
+function confirmSettlement(db, actorId, settlementId, confirmedAmountPaise) {
   const tx = db.transaction(() => {
     const settlement = db.prepare('SELECT * FROM settlements WHERE id=?').get(settlementId);
     if (!settlement) fail('Settlement not found.', 404);
     if (settlement.receiver_id !== actorId) fail('Only the receiver can confirm this payment.', 403);
     if (settlement.status !== 'pending_confirmation') fail('This settlement has already been confirmed.', 409);
+    const actualPaise = confirmedAmountPaise === undefined ? settlement.amount_paise : Number(confirmedAmountPaise);
+    if (!Number.isSafeInteger(actualPaise) || actualPaise <= 0 || actualPaise > settlement.amount_paise) {
+      fail('Confirmed amount must be positive and no more than the requested amount.');
+    }
     const snapshot = financeSnapshot(db);
     const payer = snapshot.members.find(m => m.id === settlement.payer_id);
     const receiver = snapshot.members.find(m => m.id === settlement.receiver_id);
-    if (!payer || !receiver || payer.netBalancePaise >= 0 || receiver.netBalancePaise <= 0 || settlement.amount_paise > Math.min(-payer.netBalancePaise, receiver.netBalancePaise)) {
+    if (!payer || !receiver || payer.netBalancePaise >= 0 || receiver.netBalancePaise <= 0 || actualPaise > Math.min(-payer.netBalancePaise, receiver.netBalancePaise)) {
       fail('The outstanding balances changed; this payment can no longer be confirmed as recorded.', 409);
     }
-    db.prepare("UPDATE settlements SET status='confirmed',confirmed_at=datetime('now') WHERE id=? AND status='pending_confirmation'").run(settlementId);
+    db.prepare("UPDATE settlements SET status='confirmed',confirmed_amount_paise=?,confirmed_at=datetime('now') WHERE id=? AND status='pending_confirmation'").run(actualPaise, settlementId);
     const receiverName = db.prepare('SELECT display_name FROM users WHERE id=?').get(actorId).display_name;
-    notify(db, settlement.payer_id, 'Settlement confirmed', `${receiverName} confirmed your payment.`, 'settlement', settlementId);
-    notify(db, actorId, 'Settlement confirmed', 'The payment is now included in the balances.', 'settlement', settlementId);
-    return true;
+    notify(db, settlement.payer_id, 'Settlement confirmed', `${receiverName} confirmed ${actualPaise < settlement.amount_paise ? 'a partial payment' : 'your payment'}.`, 'settlement', settlementId);
+    notify(db, actorId, 'Settlement confirmed', 'The confirmed amount is now included in the balances.', 'settlement', settlementId);
+    return { confirmedAmountPaise: actualPaise };
   });
   return tx();
 }
@@ -351,5 +388,5 @@ function getReport(db, year, month) {
 module.exports = {
   CATEGORIES, fail, validDate, currentHouseholdMonth, notify, tallyVotes, createExpense, voteOnExpense,
   financeSnapshot, suggestSettlements, getDashboard, expenseWithPayer, listExpenses,
-  getApprovals, getSettlements, createSettlement, confirmSettlement, getReport
+  getApprovals, getSettlements, createSettlement, recordReceivedSettlement, confirmSettlement, getReport
 };

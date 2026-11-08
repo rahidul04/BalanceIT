@@ -96,9 +96,21 @@ app.post('/api/settlements', ...protectedApi, (req, res) => {
   const id = service.createSettlement(db, req.session.user.id, { ...req.body, amountPaise });
   res.status(201).json({ id, message: 'Payment recorded and sent to the receiver for confirmation.' });
 });
+app.post('/api/settlements/received', ...protectedApi, (req, res) => {
+  let amountPaise;
+  try { amountPaise = parseRupeesToPaise(req.body.amount); }
+  catch (error) { return res.status(400).json({ error: error.message }); }
+  const id = service.recordReceivedSettlement(db, req.session.user.id, { ...req.body, amountPaise });
+  res.status(201).json({ id, message: 'Payment marked received. Balances have been updated.' });
+});
 app.post('/api/settlements/:id/confirm', ...protectedApi, (req, res) => {
-  service.confirmSettlement(db, req.session.user.id, Number(req.params.id));
-  res.json({ ok: true, message: 'Payment confirmed and included in balances.' });
+  let confirmedAmountPaise;
+  if (req.body.amount !== undefined) {
+    try { confirmedAmountPaise = parseRupeesToPaise(req.body.amount); }
+    catch (error) { return res.status(400).json({ error: error.message }); }
+  }
+  const result = service.confirmSettlement(db, req.session.user.id, Number(req.params.id), confirmedAmountPaise);
+  res.json({ ok: true, confirmedAmountPaise: result.confirmedAmountPaise, message: 'Payment confirmed and balances have been updated.' });
 });
 
 app.get('/api/notifications', ...protectedApi, (req, res) => {

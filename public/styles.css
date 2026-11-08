@@ -165,6 +165,17 @@ td strong { font-weight: 600; }
 .balance-card .balance-num { margin-top: 12px; font: 800 16px Manrope; }
 .settlement-layout { display: grid; grid-template-columns: minmax(0,1.2fr) minmax(300px,.8fr); gap: 18px; align-items: start; }
 .suggestion-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 15px 19px; border-top: 1px solid #eff1ef; }
+.personal-settlements { margin-bottom: 18px; }
+.personal-settlement-row { display: grid; grid-template-columns: minmax(160px,1fr) auto auto; align-items: center; gap: 15px; }
+.personal-transfer { min-width: 0; }
+.personal-transfer .transfer-people { font-size: 12px; }
+.personal-transfer small { display: block; color: var(--muted); font-size: 9px; margin: 5px 0 0; }
+.personal-action { display: flex; justify-content: flex-end; }
+.personal-action button { min-width: 100px; }
+.full-amount-option { display: flex; align-items: center; gap: 10px; border: 1px solid #e6ece7; background: #f8fbf8; border-radius: 10px; padding: 12px; color: #536057; font-size: 11px; cursor: pointer; }
+.full-amount-option input { accent-color: var(--green); width: 16px; height: 16px; }
+.full-amount-option strong { color: var(--ink); margin-left: 3px; }
+.settlement-modal .form-actions { margin-top: 21px; }
 .transfer-people { display: flex; align-items: center; gap: 9px; font-size: 11px; font-weight: 600; }
 .transfer-arrow { color: #9ca69e; }
 .transfer-amount { font: 700 13px Manrope; white-space: nowrap; }
@@ -239,6 +250,7 @@ body.dark th, body.dark .totals-strip, body.dark .totals-strip > div, body.dark 
 body.dark td, body.dark .member-row, body.dark .suggestion-row, body.dark .notification-item { border-color: var(--line); color: #d7e3da; }
 body.dark .member-ident strong, body.dark .section-head h2, body.dark .section-head h3, body.dark .summary-value, body.dark .summary-foot, body.dark .approval-card h3, body.dark .amount-cell, body.dark .form-aside h3, body.dark .settlement-form h2, body.dark .modal-head h2 { color: var(--ink); }
 body.dark .login-page { background: var(--bg); }
+body.dark .full-amount-option { background: #202d25; border-color: var(--line); color: #d7e3da; }
 body.dark .login-art { background: #1c3024; }
 body.dark .login-art-copy h1, body.dark .login-box h2 { color: var(--ink); }
 body.dark .illus-card { background: #24372b; border-color: var(--line); }
@@ -298,6 +310,10 @@ body.dark .illus-card { background: #24372b; border-color: var(--line); }
   .balance-grid { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
   .balance-card { padding: 13px; }
   .balance-card .balance-num { font-size: 14px; }
+  .personal-settlement-row { grid-template-columns: minmax(0,1fr) auto; gap: 10px; padding: 13px 15px; }
+  .personal-settlement-row .personal-transfer { grid-column: 1 / -1; }
+  .personal-action { justify-content: flex-start; }
+  .personal-action button { min-width: 90px; }
   .report-toolbar { width: 100%; }
   .report-toolbar .field { flex: 1; min-width: 0; }
   .report-toolbar .primary-button { padding: 10px; }

@@ -15,6 +15,7 @@ const money = paise => new Intl.NumberFormat('en-IN', { style: 'currency', curre
 const shortMoney = paise => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format((Number(paise) || 0) / 100);
 const dateLabel = value => value ? new Date(`${value}T12:00:00`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
 const initials = name => String(name || '?').split(/\s+/).map(part => part[0]).slice(0, 2).join('').toUpperCase();
+const settledAmount = settlement => settlement.confirmed_amount_paise ?? settlement.amount_paise;
 const localToday = () => {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -196,14 +197,50 @@ async function renderExpenses(params) {
 
 async function renderSettlements() {
   const data = await api('/api/settlements');
+  const personalItems = new Map();
+  for (const suggestion of data.suggestions.filter(s => s.payerId === currentUser.id || s.receiverId === currentUser.id)) {
+    personalItems.set(`${suggestion.payerId}:${suggestion.receiverId}`, { ...suggestion, pending: null });
+  }
+  for (const pending of data.history.filter(s => s.status === 'pending_confirmation' && (s.payer_id === currentUser.id || s.receiver_id === currentUser.id))) {
+    const key = `${pending.payer_id}:${pending.receiver_id}`;
+    const item = personalItems.get(key) || {
+      payerId: pending.payer_id, payerName: pending.payer_name,
+      receiverId: pending.receiver_id, receiverName: pending.receiver_name,
+      amountPaise: pending.amount_paise
+    };
+    item.pending = pending;
+    personalItems.set(key, item);
+  }
+  const personalRows = personalItems.size ? [...personalItems.values()].map(item => {
+    const isPayer = item.payerId === currentUser.id;
+    const otherName = isPayer ? item.receiverName : item.payerName;
+    const relationship = isPayer ? `You pay ${escapeHtml(otherName)}` : `${escapeHtml(otherName)} pays you`;
+    const amountPaise = item.pending ? item.pending.amount_paise : item.amountPaise;
+    let action = '';
+    if (item.pending && isPayer) {
+      action = `<span class="badge pending">Waiting for ${escapeHtml(item.receiverName)}</span>`;
+    } else if (item.pending && !isPayer) {
+      action = `<button class="primary-button" data-action="settlement-action" data-mode="confirm" data-id="${item.pending.id}" data-counterpart-name="${escapeHtml(otherName)}" data-amount-paise="${amountPaise}">Received</button>`;
+    } else if (isPayer) {
+      action = `<button class="primary-button" data-action="settlement-action" data-mode="pay" data-payer-id="${item.payerId}" data-receiver-id="${item.receiverId}" data-counterpart-name="${escapeHtml(otherName)}" data-amount-paise="${amountPaise}">Paid</button>`;
+    } else {
+      action = `<button class="secondary-button" data-action="settlement-action" data-mode="receive" data-payer-id="${item.payerId}" data-receiver-id="${item.receiverId}" data-counterpart-name="${escapeHtml(otherName)}" data-amount-paise="${amountPaise}">Received</button>`;
+    }
+    return `<div class="suggestion-row personal-settlement-row"><div class="personal-transfer"><div class="transfer-people">${relationship}</div><small>${item.pending ? `Payment request · ${dateLabel(item.pending.payment_date)}` : 'Suggested from your current balance'}</small></div><strong class="transfer-amount">${money(amountPaise)}</strong><div class="personal-action">${action}</div></div>`;
+  }).join('') : '<div class="empty-state"><div class="empty-icon">✓</div><h3>No payment actions for you</h3><p>Your balance is settled, or no transfer is currently assigned to you.</p></div>';
   const suggestions = data.suggestions.length ? data.suggestions.map(s => `<div class="suggestion-row"><div class="transfer-people">${initialsAvatar(s.payerName)} ${escapeHtml(s.payerName)} <span class="transfer-arrow">→</span> ${escapeHtml(s.receiverName)}</div><strong class="transfer-amount">${money(s.amountPaise)}</strong></div>`).join('') : '<div class="empty-state"><div class="empty-icon">✓</div><h3>Everyone is settled</h3><p>There are no outstanding shared balances.</p></div>';
-  const ownSuggestions = data.suggestions.filter(s => s.payerId === currentUser.id);
-  const form = ownSuggestions.length ? `<form id="settlement-form" class="settlement-form"><h2>Record a payment</h2><p class="help-text">The receiver confirms before this payment changes balances.</p><div class="form-grid"><div class="field"><label for="settlement-receiver">Pay to</label><select id="settlement-receiver" name="receiverId" required>${ownSuggestions.map(s => `<option value="${s.receiverId}" data-max="${s.amountPaise}">${escapeHtml(s.receiverName)} · up to ${money(s.amountPaise)}</option>`).join('')}</select></div><div class="field"><label for="settlement-amount">Amount (₹)</label><input id="settlement-amount" name="amount" type="number" min="0.01" step="0.01" inputmode="decimal" value="${(ownSuggestions[0].amountPaise / 100).toFixed(2)}" required></div><div class="field"><label for="settlement-date">Payment date</label><input id="settlement-date" name="paymentDate" type="date" value="${localToday()}" required></div><div class="field"><label for="settlement-note">Note (optional)</label><input id="settlement-note" name="note" maxlength="250" placeholder="e.g. UPI transfer"></div><button class="primary-button" type="submit">Send for confirmation →</button></div></form>` : `<div class="card form-aside"><div class="aside-icon">⇄</div><h3>Record a payment</h3><p>A payment form appears when your member balance has a suggested transfer to a roommate. Only confirmed payments change balances.</p></div>`;
-  const historyRows = data.history.length ? data.history.map(s => `<tr><td>${dateLabel(s.payment_date)}</td><td>${escapeHtml(s.payer_name)}</td><td>${escapeHtml(s.receiver_name)}</td><td class="amount-cell">${money(s.amount_paise)}</td><td>${statusBadge(s.status)}</td><td>${s.status === 'pending_confirmation' && s.receiver_id === currentUser.id ? `<button class="primary-button" style="padding:7px 10px" data-action="confirm-settlement" data-id="${s.id}">Confirm received</button>` : '—'}</td></tr>`).join('') : '<tr><td colspan="6" class="table-empty">Recorded transfers will appear here.</td></tr>';
+  const historyRows = data.history.length ? data.history.map(s => {
+    const amount = settledAmount(s);
+    const partialLabel = s.status === 'confirmed' && amount !== s.amount_paise ? `<small class="help-text">of requested ${money(s.amount_paise)}</small>` : '';
+    return `<tr><td>${dateLabel(s.payment_date)}</td><td>${escapeHtml(s.payer_name)}</td><td>${escapeHtml(s.receiver_name)}</td><td class="amount-cell">${money(amount)}${partialLabel}</td><td>${statusBadge(s.status)}</td></tr>`;
+  }).join('') : '<tr><td colspan="5" class="table-empty">Recorded transfers will appear here.</td></tr>';
+  const balance = data.members.find(member => member.id === currentUser.id)?.netBalancePaise || 0;
+  const balanceText = balance < 0 ? `You need to pay ${money(-balance)}.` : balance > 0 ? `You should receive ${money(balance)}.` : 'Your balance is settled.';
   return `${pageHeading('Clear balances, fewer back-and-forths', 'Settlements', 'Suggested transfers use the full approved ledger. Pending payments wait for receiver confirmation.')}
+    <section class="card section-card personal-settlements"><div class="section-head"><div><h2>Your settlement actions</h2><p>${escapeHtml(balanceText)} Choose the amount in the popup before recording it.</p></div><span class="badge ${balance < 0 ? 'pending' : balance > 0 ? 'approved' : 'confirmed'}">Your balance</span></div>${personalRows}</section>
     <div class="balance-grid">${data.members.map(m => { const value = m.netBalancePaise; return `<article class="card balance-card">${initialsAvatar(m.name)}<strong>${escapeHtml(m.name)}</strong><small>${value > 0 ? 'Should receive' : value < 0 ? 'Needs to pay' : 'Settled'}</small><div class="balance-num ${value > 0 ? 'positive' : value < 0 ? 'negative' : 'neutral'}">${money(Math.abs(value))}</div></article>`; }).join('')}</div>
-    <div class="settlement-layout"><section class="card section-card"><div class="section-head"><div><h2>Suggested transfers</h2><p>Matched to clear each outstanding balance in as few practical steps as possible.</p></div><span class="badge approved">${data.suggestions.length} transfers</span></div>${suggestions}</section><section class="card">${form}</section></div>
-    <section class="card section-card" style="margin-top:18px"><div class="section-head"><div><h2>Settlement history</h2><p>Confirmed records reduce balances; pending records stay visible for follow-up.</p></div></div><div class="table-wrap"><table><thead><tr><th>Payment date</th><th>Paid by</th><th>Received by</th><th>Amount</th><th>Status</th><th>Action</th></tr></thead><tbody>${historyRows}</tbody></table></div></section>`;
+    <div class="settlement-layout"><section class="card section-card"><div class="section-head"><div><h2>Suggested transfers</h2><p>Matched to clear each outstanding balance in as few practical steps as possible.</p></div><span class="badge approved">${data.suggestions.length} transfers</span></div>${suggestions}</section><section class="card section-card"><div class="section-head"><div><h2>Settlement guide</h2><p>Paid sends a request to the receiver. Received updates balances immediately.</p></div></div><div class="rule-list" style="padding:0 20px 20px"><div class="rule"><span>Paid</span><span>The recipient must confirm the payment before it changes balances.</span></div><div class="rule"><span>Received</span><span>Record money you have received; no extra approval is sent.</span></div><div class="rule"><span>Partial</span><span>A custom amount is recorded in paise and the remaining balances recalculate.</span></div></div></section></div>
+    <section class="card section-card" style="margin-top:18px"><div class="section-head"><div><h2>Settlement history</h2><p>Confirmed records reduce balances; pending requests stay visible for follow-up.</p></div></div><div class="table-wrap"><table><thead><tr><th>Payment date</th><th>Paid by</th><th>Received by</th><th>Amount</th><th>Status</th></tr></thead><tbody>${historyRows}</tbody></table></div></section>`;
 }
 
 async function renderReports(params) {
@@ -215,7 +252,7 @@ async function renderReports(params) {
   const maxCategory = Math.max(1, ...data.categories.map(c => c.amount_paise));
   const categoriesChart = data.categories.length ? data.categories.map(c => `<div class="chart-row"><div class="chart-label"><span>${escapeHtml(c.category)}</span><strong>${money(c.amount_paise)}</strong></div><div class="chart-track"><div class="chart-bar" style="width:${Math.max(3,c.amount_paise / maxCategory * 100)}%"></div></div></div>`).join('') : '<p class="help-text" style="padding-top:15px">No category spending recorded in this month.</p>';
   const memberRows = data.members.map(m => `<tr><td><strong>${escapeHtml(m.name)}</strong></td><td>${money(m.sharedPaidPaise)}</td><td>${money(m.personalPaidPaise)}</td><td>${money(m.fairSharePaise)}</td><td class="${m.netBalancePaise > 0 ? 'positive' : m.netBalancePaise < 0 ? 'negative' : 'neutral'}">${money(m.netBalancePaise)}</td></tr>`).join('');
-  const settlementRows = data.settlementHistory.length ? data.settlementHistory.map(s => `<tr><td>${dateLabel(s.payment_date)}</td><td>${escapeHtml(s.payer_name)}</td><td>${escapeHtml(s.receiver_name)}</td><td>${money(s.amount_paise)}</td><td>${statusBadge(s.status)}</td></tr>`).join('') : '<tr><td colspan="5" class="table-empty">No settlements were recorded in this month.</td></tr>';
+  const settlementRows = data.settlementHistory.length ? data.settlementHistory.map(s => `<tr><td>${dateLabel(s.payment_date)}</td><td>${escapeHtml(s.payer_name)}</td><td>${escapeHtml(s.receiver_name)}</td><td>${money(settledAmount(s))}</td><td>${statusBadge(s.status)}</td></tr>`).join('') : '<tr><td colspan="5" class="table-empty">No settlements were recorded in this month.</td></tr>';
   return `${pageHeading('Spending patterns, made clear', 'Monthly reports', 'Monthly activity sits alongside all-time balances; changing the month never resets the ledger.', `<form id="report-filters" class="report-toolbar"><div class="field"><label for="report-month">Month</label><select id="report-month" name="month">${Array.from({length:12},(_,i)=>{const m=String(i+1).padStart(2,'0');return `<option value="${m}" ${month===m?'selected':''}>${new Date(2020,i,1).toLocaleDateString('en-IN',{month:'long'})}</option>`}).join('')}</select></div><div class="field"><label for="report-year">Year</label><input id="report-year" name="year" type="number" min="2000" max="2100" value="${escapeHtml(year)}"></div><button class="primary-button" type="submit">Apply</button><a class="secondary-button" href="/api/reports/export.csv?${search}" download>Export CSV</a></form>`)}
     <div class="report-stats"><article class="card report-stat"><small>Monthly shared expenses</small><strong>${money(data.totals.sharedPaise)}</strong></article><article class="card report-stat"><small>Monthly personal expenses</small><strong>${money(data.totals.personalPaise)}</strong></article></div>
     <div class="report-grid"><section class="card section-card"><div class="section-head"><div><h2>Category breakdown</h2><p>Approved spending during ${new Date(`${year}-${month}-15T12:00:00`).toLocaleDateString('en-IN',{month:'long',year:'numeric'})}.</p></div></div><div class="chart-list">${categoriesChart}</div></section>
@@ -268,6 +305,34 @@ async function loadNotifications() {
     container.innerHTML = data.notifications.length ? data.notifications.map(n => `<div class="notification-item ${n.is_read ? '' : 'unread'}" data-action="open-notification" data-id="${n.id}" data-related="${escapeHtml(n.related_type || '')}"><span><strong>${escapeHtml(n.title)}</strong><br>${escapeHtml(n.message)}<small>${dateLabel((n.created_at || '').slice(0,10))}</small></span></div>`).join('') : '<div class="empty-state" style="padding:25px 8px"><p>You’re all caught up.</p></div>';
   } catch { container.innerHTML = '<div class="help-text">Notifications could not be loaded.</div>'; }
 }
+
+function openSettlementModal(button) {
+  const mode = button.dataset.mode;
+  const amountPaise = Number(button.dataset.amountPaise);
+  const counterpart = button.dataset.counterpartName || 'your roommate';
+  const isPay = mode === 'pay';
+  const isDirectReceive = mode === 'receive';
+  const title = isPay ? `Pay ${counterpart}` : `Received from ${counterpart}`;
+  const explanation = isPay
+    ? `This sends ${counterpart} a payment request. Your balance changes after they confirm it.`
+    : isDirectReceive
+      ? `Record the amount you received from ${counterpart}. Balances update immediately; no approval request is sent.`
+      : `Confirm the amount received from ${counterpart}. Balances update as soon as you confirm.`;
+  const buttonLabel = isPay ? 'Send payment request' : isDirectReceive ? 'Mark received' : 'Confirm received';
+  const modal = document.createElement('div');
+  modal.className = 'modal-backdrop';
+  modal.innerHTML = `<section class="modal settlement-modal" role="dialog" aria-modal="true" aria-labelledby="settlement-modal-title">
+    <div class="modal-head"><div><div class="eyebrow">Settlement</div><h2 id="settlement-modal-title">${escapeHtml(title)}</h2></div><button class="modal-close" data-action="close-modal" aria-label="Close">×</button></div>
+    <p class="subtitle" style="margin-bottom:16px">${escapeHtml(explanation)}</p>
+    <form id="settlement-action-form" data-mode="${escapeHtml(mode)}" data-id="${escapeHtml(button.dataset.id || '')}" data-payer-id="${escapeHtml(button.dataset.payerId || '')}" data-receiver-id="${escapeHtml(button.dataset.receiverId || '')}" data-amount-paise="${amountPaise}">
+      <label class="full-amount-option"><input id="settlement-full-amount" name="fullAmount" type="checkbox" checked> <span>Use the full amount <strong>${money(amountPaise)}</strong></span></label>
+      <div class="field" style="margin-top:14px"><label for="settlement-custom-amount">Custom amount (₹)</label><input id="settlement-custom-amount" name="amount" type="number" min="0.01" max="${(amountPaise / 100).toFixed(2)}" step="0.01" inputmode="decimal" value="${(amountPaise / 100).toFixed(2)}" disabled required><small class="help-text">Cannot exceed the current suggested or requested amount.</small></div>
+      ${mode === 'confirm' ? '' : `<div class="field" style="margin-top:13px"><label for="settlement-action-date">${isPay ? 'Payment date' : 'Date received'}</label><input id="settlement-action-date" name="paymentDate" type="date" value="${localToday()}" required></div><div class="field" style="margin-top:13px"><label for="settlement-action-note">Note (optional)</label><input id="settlement-action-note" name="note" maxlength="250" placeholder="e.g. UPI transfer"></div>`}
+      <div class="form-actions"><button type="button" class="secondary-button" data-action="close-modal">Cancel</button><button type="submit" class="primary-button">${buttonLabel}</button></div>
+    </form></section>`;
+  app.append(modal);
+}
+
 function updateUnreadBadge() {
   document.querySelectorAll('.notification-dot').forEach(n => n.remove());
   const button = document.querySelector('[data-action="notifications"]');
@@ -334,10 +399,23 @@ app.addEventListener('submit', async event => {
     location.hash = `#expenses${query.size ? `?${query}` : ''}`;
     return;
   }
-  if (form.id === 'settlement-form') {
+  if (form.id === 'settlement-action-form') {
+    const mode = form.dataset.mode;
+    const amount = values.has('fullAmount')
+      ? (Number(form.dataset.amountPaise) / 100).toFixed(2)
+      : values.get('amount');
     try {
-      const result = await api('/api/settlements', { method: 'POST', body: JSON.stringify({ receiverId: values.get('receiverId'), amount: values.get('amount'), paymentDate: values.get('paymentDate'), note: values.get('note') }) });
-      showToast(result.message); await loadRoute();
+      let result;
+      if (mode === 'pay') {
+        result = await api('/api/settlements', { method: 'POST', body: JSON.stringify({ receiverId: form.dataset.receiverId, amount, paymentDate: values.get('paymentDate'), note: values.get('note') }) });
+      } else if (mode === 'receive') {
+        result = await api('/api/settlements/received', { method: 'POST', body: JSON.stringify({ payerId: form.dataset.payerId, amount, paymentDate: values.get('paymentDate'), note: values.get('note') }) });
+      } else {
+        result = await api(`/api/settlements/${form.dataset.id}/confirm`, { method: 'POST', body: JSON.stringify({ amount }) });
+      }
+      form.closest('.modal-backdrop')?.remove();
+      await loadRoute();
+      showToast(result.message);
     } catch (error) { showToast(error.message, true); }
     return;
   }
@@ -355,6 +433,10 @@ app.addEventListener('change', event => {
     const option = event.target.selectedOptions[0];
     const amount = document.getElementById('settlement-amount');
     if (amount && option) amount.value = (Number(option.dataset.max) / 100).toFixed(2);
+  }
+  if (event.target.id === 'settlement-full-amount') {
+    const amount = document.getElementById('settlement-custom-amount');
+    if (amount) amount.disabled = event.target.checked;
   }
 });
 
@@ -380,6 +462,7 @@ app.addEventListener('click', async event => {
     return;
   }
   if (action === 'details') return showExpenseDetails(button.dataset.id);
+  if (action === 'settlement-action') return openSettlementModal(button);
   if (action === 'close-modal') { button.closest('.modal-backdrop')?.remove(); return; }
   if (action === 'retry') return loadRoute();
   if (action === 'page') {
@@ -436,7 +519,7 @@ setInterval(async () => {
     const data = await api('/api/notifications');
     window.__unread = data.unread;
     updateUnreadBadge();
-    if (currentRoute === 'approvals') await loadRoute();
+    if (currentRoute === 'approvals' || currentRoute === 'dashboard' || (currentRoute === 'settlements' && !document.querySelector('.modal-backdrop'))) await loadRoute();
   } catch {}
 }, 9000);
 boot();

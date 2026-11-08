@@ -58,4 +58,12 @@ test('session authentication protects private API and the voting flow works end 
   const detail = await fetch(`${base}/api/expenses/${expenseId}`, { headers: { cookie: member1 } });
   assert.equal(detail.status, 200);
   assert.equal((await detail.json()).status, 'approved');
+
+  const received = await fetch(`${base}/api/settlements/received`, {
+    method: 'POST', headers: { ...origin, 'content-type': 'application/json' },
+    body: JSON.stringify({ payerId: 2, amount: '1.00', paymentDate: '2026-11-07' })
+  });
+  assert.equal(received.status, 201);
+  const settlement = await received.json();
+  assert.match(settlement.message, /Balances have been updated/);
 });
