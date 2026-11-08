@@ -385,8 +385,127 @@ function getReport(db, year, month) {
   };
 }
 
+function buildDataResetArchive(db) {
+  const members = db.prepare('SELECT id,username,display_name FROM users ORDER BY id').all();
+  const expenses = db.prepare(`SELECT e.*,u.display_name AS paid_by_name FROM expenses e
+    JOIN users u ON u.id=e.paid_by ORDER BY e.id`).all();
+  for (const expense of expenses) {
+    expense.participants = db.prepare(`SELECT ep.user_id,u.display_name,ep.share_paise FROM expense_participants ep
+      JOIN users u ON u.id=ep.user_id WHERE ep.expense_id=? ORDER BY ep.user_id`).all(expense.id);
+    expense.votes = db.prepare(`SELECT v.user_id,u.display_name,v.vote,v.rejection_reason,v.created_at FROM expense_votes v
+      JOIN users u ON u.id=v.user_id WHERE v.expense_id=? ORDER BY v.created_at,v.id`).all(expense.id);
+  }
+  const settlements = db.prepare(`SELECT s.*,p.display_name AS payer_name,r.display_name AS receiver_name
+    FROM settlements s JOIN users p ON p.id=s.payer_id JOIN users r ON r.id=s.receiver_id ORDER BY s.id`).all();
+  return { members, expenses, settlements };
+}
+
+function getDataResetState(db) {
+  const requests = db.prepare(`SELECT r.id,r.requested_by,r.status,r.created_at,r.completed_at,
+      u.display_name AS requested_by_name,
+      (SELECT COUNT(*) FROM data_reset_votes v WHERE v.request_id=r.id AND v.vote='approved') AS approvals,
+      (SELECT COUNT(*) FROM data_reset_votes v WHERE v.request_id=r.id AND v.vote='rejected') AS rejections,
+      a.id AS archive_id,a.archived_at,a.expense_count,a.settlement_count
+    FROM data_reset_requests r JOIN users u ON u.id=r.requested_by
+    LEFT JOIN data_reset_archives a ON a.request_id=r.id
+    ORDER BY r.created_at DESC,r.id DESC LIMIT 30`).all();
+  for (const request of requests) {
+    request.votes = db.prepare(`SELECT v.user_id,u.display_name,v.vote,v.created_at FROM data_reset_votes v
+      JOIN users u ON u.id=v.user_id WHERE v.request_id=? ORDER BY v.created_at,v.id`).all(request.id);
+  }
+  const pendingRequest = requests.find(request => request.status === 'pending') || null;
+  return {
+    pending: pendingRequest,
+    history: requests.filter(request => request.status !== 'pending')
+  };
+}
+
+function createDataResetRequest(db, actorId) {
+  const tx = db.transaction(() => {
+    const existing = db.prepare("SELECT id FROM data_reset_requests WHERE status='pending'").get();
+    if (existing) fail('A household data reset request is already awaiting votes.', 409);
+    const requester = db.prepare('SELECT id,display_name FROM users WHERE id=?').get(actorId);
+    if (!requester) fail('Your member account could not be found.', 401);
+    const result = db.prepare("INSERT INTO data_reset_requests(requested_by,status) VALUES(?,'pending')").run(actorId);
+    const requestId = Number(result.lastInsertRowid);
+    db.prepare("INSERT INTO data_reset_votes(request_id,user_id,vote) VALUES(?,?,'approved')").run(requestId, actorId);
+    const recipients = db.prepare('SELECT id FROM users WHERE id!=?').all(actorId);
+    for (const recipient of recipients) {
+      notify(db, recipient.id, 'Household reset vote requested', `${requester.display_name} requested a full ledger reset. Review it on the Reports page.`, 'data_reset', requestId);
+    }
+    return requestId;
+  });
+  return tx();
+}
+
+function voteOnDataReset(db, actorId, requestId, vote) {
+  if (!['approved', 'rejected'].includes(vote)) fail('Choose approve or reject for this reset request.');
+  const tx = db.transaction(() => {
+    const request = db.prepare('SELECT * FROM data_reset_requests WHERE id=?').get(requestId);
+    if (!request) fail('Reset request not found.', 404);
+    if (request.status !== 'pending') fail('This reset request is no longer awaiting votes.', 409);
+    if (request.requested_by === actorId) fail('Your approval was already counted when you requested the reset.', 409);
+    const existingVote = db.prepare('SELECT vote FROM data_reset_votes WHERE request_id=? AND user_id=?').get(requestId, actorId);
+    if (existingVote) fail('You have already voted on this reset request.', 409);
+    if (!db.prepare('SELECT id FROM users WHERE id=?').get(actorId)) fail('Your member account could not be found.', 401);
+
+    db.prepare('INSERT INTO data_reset_votes(request_id,user_id,vote) VALUES(?,?,?)').run(requestId, actorId, vote);
+    const counts = db.prepare(`SELECT SUM(vote='approved') AS approvals,SUM(vote='rejected') AS rejections
+      FROM data_reset_votes WHERE request_id=?`).get(requestId);
+    const approvals = counts.approvals || 0;
+    const rejections = counts.rejections || 0;
+    const voter = db.prepare('SELECT display_name FROM users WHERE id=?').get(actorId);
+
+    if (approvals >= 4) {
+      const archive = buildDataResetArchive(db);
+      const archived = db.prepare(`INSERT INTO data_reset_archives(request_id,archived_by,expense_count,settlement_count,archive_json)
+        VALUES(?,?,?,?,?)`).run(requestId, request.requested_by, archive.expenses.length, archive.settlements.length, JSON.stringify(archive));
+      const archiveId = Number(archived.lastInsertRowid);
+      db.prepare("UPDATE data_reset_requests SET status='completed',completed_at=datetime('now') WHERE id=?").run(requestId);
+
+      // Keep member accounts and the reset audit/archive tables; clear only the active ledger and old notifications.
+      db.prepare('DELETE FROM expense_votes').run();
+      db.prepare('DELETE FROM expense_participants').run();
+      db.prepare('DELETE FROM expenses').run();
+      db.prepare('DELETE FROM settlements').run();
+      db.prepare('DELETE FROM notifications').run();
+      const members = db.prepare('SELECT id FROM users').all();
+      for (const member of members) {
+        notify(db, member.id, 'Ledger reset completed', `The household approved a reset. ${archive.expenses.length} expense records and ${archive.settlements.length} settlement records were archived.`, 'data_reset', requestId);
+      }
+      return { status: 'completed', approvals, rejections, archiveId, message: 'Reset approved. The live ledger is cleared and its previous history is preserved in Reports.' };
+    }
+
+    if (rejections >= 2) {
+      db.prepare("UPDATE data_reset_requests SET status='rejected',completed_at=datetime('now') WHERE id=?").run(requestId);
+      const members = db.prepare('SELECT id FROM users').all();
+      for (const member of members) {
+        notify(db, member.id, 'Reset request declined', 'The reset request received two rejections and was closed. No ledger data was changed.', 'data_reset', requestId);
+      }
+      return { status: 'rejected', approvals, rejections, message: 'Reset request declined. No ledger data was changed.' };
+    }
+
+    notify(db, request.requested_by, 'Reset vote recorded', `${voter.display_name} ${vote} the household reset request.`, 'data_reset', requestId);
+    return { status: 'pending', approvals, rejections, message: 'Your vote has been recorded.' };
+  });
+  return tx();
+}
+
+function getDataResetArchive(db, archiveId) {
+  const row = db.prepare(`SELECT a.*,r.requested_by,u.display_name AS requested_by_name
+    FROM data_reset_archives a JOIN data_reset_requests r ON r.id=a.request_id
+    JOIN users u ON u.id=r.requested_by WHERE a.id=?`).get(archiveId);
+  if (!row) fail('Preserved history archive not found.', 404);
+  return {
+    id: row.id, archivedAt: row.archived_at, requestedBy: row.requested_by_name,
+    expenseCount: row.expense_count, settlementCount: row.settlement_count,
+    ...JSON.parse(row.archive_json)
+  };
+}
+
 module.exports = {
   CATEGORIES, fail, validDate, currentHouseholdMonth, notify, tallyVotes, createExpense, voteOnExpense,
   financeSnapshot, suggestSettlements, getDashboard, expenseWithPayer, listExpenses,
-  getApprovals, getSettlements, createSettlement, recordReceivedSettlement, confirmSettlement, getReport
+  getApprovals, getSettlements, createSettlement, recordReceivedSettlement, confirmSettlement, getReport,
+  getDataResetState, createDataResetRequest, voteOnDataReset, getDataResetArchive
 };

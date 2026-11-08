@@ -40,6 +40,7 @@ For a fresh setup, configure the five usernames and passwords before the first s
 - Four independent votes per expense. Three approvals approve, two rejections reject, submitters cannot vote, and a unique database constraint prevents repeat votes.
 - Pending expenses never affect the ledger. Personal expenses are approved and reported but excluded from shared fair shares and balances.
 - Backend paise calculations, all-time member balances, minimum-count transfers for the five-member balance set, payer-requested/receiver-confirmed payments, immediate received-payment records, notifications, filtering, monthly reports, and CSV export.
+- Reports-page data reset requests require four approvals total (the requester plus three other members). Two rejections close the request. On approval, the active expense and settlement ledger is archived for review, then cleared; the five accounts and reset audit history remain.
 - Responsive desktop sidebar and compact mobile navigation, light and dark appearance toggle, loading/empty/error feedback, and approval polling while the approvals page is open.
 
 ## Tests
@@ -50,7 +51,7 @@ Run the automated business-logic tests with:
 npm test
 ```
 
-They cover expense creation, duplicate votes, approval and rejection thresholds, self-vote rejection, paise allocation and rounding, member balances, personal and pending expense exclusions, transfer matching, and settlement confirmation.
+They cover expense creation, duplicate votes, approval and rejection thresholds, self-vote rejection, paise allocation and rounding, member balances, personal and pending expense exclusions, transfer matching, settlement confirmation, and the four-member data-reset quorum with preserved archives.
 
 ## API overview
 
@@ -75,10 +76,14 @@ All API responses and request bodies are JSON except CSV export. Every endpoint 
 | `GET /api/notifications` | Current member's latest notifications and unread count |
 | `PATCH /api/notifications/:id/read` | Mark one notification read |
 | `PATCH /api/notifications/read-all` | Mark all current member notifications read |
+| `GET /api/data-resets` | Current pending reset request and recent reset decision history |
+| `POST /api/data-resets` | Request a ledger reset; requester is counted as the first approval |
+| `POST /api/data-resets/:id/vote` | Submit `{ "vote": "approved" }` or `{ "vote": "rejected" }`; four approvals complete the reset, two rejections close it |
+| `GET /api/data-resets/archives/:id` | Read a preserved expense and settlement snapshot after an approved reset |
 | `GET /api/reports?year=YYYY&month=MM` | Monthly spending, member report, categories, and settlement history |
 | `GET /api/reports/export.csv?year=YYYY&month=MM` | Download that report as CSV |
 
-The API validates dates, categories, types, amounts, membership, vote permissions, receiver identity, and current balances on the server. It uses parameterized SQL. Migrations `001_initial.sql` and `002_confirmed_settlement_amount.sql` create and extend the normalized schema; applied migration versions are recorded in `schema_migrations`.
+The API validates dates, categories, types, amounts, membership, vote permissions, receiver identity, and current balances on the server. It uses parameterized SQL. Migrations `001_initial.sql`, `002_confirmed_settlement_amount.sql`, and `003_data_reset_approval.sql` create and extend the normalized schema; applied migration versions are recorded in `schema_migrations`.
 
 ## Deploy
 

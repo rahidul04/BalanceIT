@@ -66,4 +66,26 @@ test('session authentication protects private API and the voting flow works end 
   assert.equal(received.status, 201);
   const settlement = await received.json();
   assert.match(settlement.message, /Balances have been updated/);
+
+  const resetResponse = await fetch(`${base}/api/data-resets`, {
+    method: 'POST', headers: { ...origin, 'content-type': 'application/json' }, body: '{}'
+  });
+  assert.equal(resetResponse.status, 201);
+  const resetId = (await resetResponse.json()).id;
+  for (const member of [2, 3, 4]) {
+    const cookie = await login(member);
+    const vote = await fetch(`${base}/api/data-resets/${resetId}/vote`, {
+      method: 'POST', headers: { origin: base, cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ vote: 'approved' })
+    });
+    assert.equal(vote.status, 200);
+    if (member === 4) assert.equal((await vote.json()).status, 'completed');
+  }
+  const resetHistory = await fetch(`${base}/api/data-resets`, { headers: { cookie: member1 } });
+  const resetHistoryData = await resetHistory.json();
+  assert.equal(resetHistoryData.history[0].status, 'completed');
+  const archiveId = resetHistoryData.history[0].archive_id;
+  const archiveResponse = await fetch(`${base}/api/data-resets/archives/${archiveId}`, { headers: { cookie: member1 } });
+  assert.equal(archiveResponse.status, 200);
+  assert.equal((await archiveResponse.json()).expenses.length, 1);
 });

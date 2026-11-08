@@ -33,7 +33,8 @@ function openDatabase(filename) {
   db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (datetime(\'now\')));');
   const migrations = [
     { version: 1, file: '001_initial.sql' },
-    { version: 2, file: '002_confirmed_settlement_amount.sql' }
+    { version: 2, file: '002_confirmed_settlement_amount.sql' },
+    { version: 3, file: '003_data_reset_approval.sql' }
   ];
   for (const migration of migrations) {
     const applied = db.prepare('SELECT 1 FROM schema_migrations WHERE version=?').get(migration.version);

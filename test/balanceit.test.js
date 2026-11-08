@@ -207,3 +207,53 @@ test('startup config sync updates existing display names without changing passwo
   assert.deepEqual(rows.map(row => row.display_name), members.map(member => member.displayName));
   assert.deepEqual(rows.map(row => row.password_hash), Array(5).fill('test-hash'));
 });
+
+test('data reset waits for requester plus three other approvals, archives history, and keeps member accounts', t => {
+  const db = fixture(); t.after(() => db.close());
+  const expenseId = submit(db, 1, { amountPaise: 10000 });
+  approve(db, expenseId);
+  const settlementId = service.createSettlement(db, 2, { receiverId: 1, amountPaise: 5000, paymentDate: '2026-11-07', note: 'Original payment' });
+  service.confirmSettlement(db, 1, settlementId);
+
+  const requestId = service.createDataResetRequest(db, 5);
+  assert.equal(db.prepare('SELECT vote FROM data_reset_votes WHERE request_id=? AND user_id=5').get(requestId).vote, 'approved');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM notifications WHERE related_type=? AND related_id=?').get('data_reset', requestId).n, 4);
+  assert.throws(() => service.voteOnDataReset(db, 5, requestId, 'approved'), /already counted/);
+
+  assert.equal(service.voteOnDataReset(db, 1, requestId, 'approved').status, 'pending');
+  assert.throws(() => service.voteOnDataReset(db, 1, requestId, 'approved'), /already voted/);
+  assert.equal(service.voteOnDataReset(db, 2, requestId, 'approved').status, 'pending');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM expenses').get().n, 1, 'the ledger remains until all required votes arrive');
+  const completed = service.voteOnDataReset(db, 3, requestId, 'approved');
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.approvals, 4);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM expenses').get().n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM settlements').get().n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM expense_votes').get().n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM users').get().n, 5);
+
+  const archive = service.getDataResetArchive(db, completed.archiveId);
+  assert.equal(archive.expenseCount, 1);
+  assert.equal(archive.settlementCount, 1);
+  assert.equal(archive.expenses[0].id, expenseId);
+  assert.equal(archive.expenses[0].votes.length, 3);
+  assert.equal(archive.settlements[0].id, settlementId);
+  const state = service.getDataResetState(db);
+  assert.equal(state.pending, null);
+  assert.equal(state.history[0].status, 'completed');
+  assert.equal(state.history[0].archive_id, completed.archiveId);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM notifications WHERE title='Ledger reset completed'").get().n, 5);
+});
+
+test('two reset rejections close the request without deleting or archiving ledger data', t => {
+  const db = fixture(); t.after(() => db.close());
+  const expenseId = submit(db);
+  const requestId = service.createDataResetRequest(db, 1);
+  assert.equal(service.voteOnDataReset(db, 2, requestId, 'rejected').status, 'pending');
+  const declined = service.voteOnDataReset(db, 3, requestId, 'rejected');
+  assert.equal(declined.status, 'rejected');
+  assert.equal(db.prepare('SELECT status FROM expenses WHERE id=?').get(expenseId).status, 'pending');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM data_reset_archives').get().n, 0);
+  assert.throws(() => service.voteOnDataReset(db, 4, requestId, 'approved'), /no longer awaiting votes/);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM notifications WHERE title='Reset request declined'").get().n, 5);
+});

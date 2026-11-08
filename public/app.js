@@ -264,18 +264,41 @@ async function renderReports(params) {
   const now = new Date();
   const year = params.get('year') || String(now.getFullYear());
   const month = params.get('month') || String(now.getMonth() + 1).padStart(2, '0');
-  const data = await api(`/api/reports?year=${encodeURIComponent(year)}&month=${encodeURIComponent(month)}`);
+  const [data, resetState] = await Promise.all([
+    api(`/api/reports?year=${encodeURIComponent(year)}&month=${encodeURIComponent(month)}`),
+    api('/api/data-resets')
+  ]);
+  rememberLiveSnapshot('reports', resetState);
   const search = new URLSearchParams({ year, month });
   const maxCategory = Math.max(1, ...data.categories.map(c => c.amount_paise));
   const categoriesChart = data.categories.length ? data.categories.map(c => `<div class="chart-row"><div class="chart-label"><span>${escapeHtml(c.category)}</span><strong>${money(c.amount_paise)}</strong></div><div class="chart-track"><div class="chart-bar" style="width:${Math.max(3,c.amount_paise / maxCategory * 100)}%"></div></div></div>`).join('') : '<p class="help-text" style="padding-top:15px">No category spending recorded in this month.</p>';
   const memberRows = data.members.map(m => `<tr><td><strong>${escapeHtml(m.name)}</strong></td><td>${money(m.sharedPaidPaise)}</td><td>${money(m.personalPaidPaise)}</td><td>${money(m.fairSharePaise)}</td><td class="${m.netBalancePaise > 0 ? 'positive' : m.netBalancePaise < 0 ? 'negative' : 'neutral'}">${money(m.netBalancePaise)}</td></tr>`).join('');
   const settlementRows = data.settlementHistory.length ? data.settlementHistory.map(s => `<tr><td>${dateLabel(s.payment_date)}</td><td>${escapeHtml(s.payer_name)}</td><td>${escapeHtml(s.receiver_name)}</td><td>${money(settledAmount(s))}</td><td>${statusBadge(s.status)}</td></tr>`).join('') : '<tr><td colspan="5" class="table-empty">No settlements were recorded in this month.</td></tr>';
+  const pendingReset = resetState.pending;
+  const pendingMyVote = pendingReset?.votes.find(vote => vote.user_id === currentUser.id);
+  const resetVoteRows = pendingReset ? pendingReset.votes.map(vote => `<div class="reset-vote-row"><span>${escapeHtml(vote.display_name)}${vote.user_id === pendingReset.requested_by ? ' · requester' : ''}</span>${statusBadge(vote.vote)}</div>`).join('') : '';
+  const canVoteOnReset = pendingReset && pendingReset.requested_by !== currentUser.id && !pendingMyVote;
+  const resetRequestPanel = pendingReset ? `<div class="reset-pending-panel"><div class="reset-request-head"><div><strong>Reset request #${pendingReset.id}</strong><small>Started by ${escapeHtml(pendingReset.requested_by_name)} · ${dateLabel((pendingReset.created_at || '').slice(0,10))}</small></div><span class="badge pending">Awaiting votes</span></div><div class="reset-vote-counts"><span><strong>${pendingReset.approvals || 0}/4</strong> approvals required</span><span><strong>${pendingReset.rejections || 0}/2</strong> rejections to close</span></div><div class="reset-vote-list">${resetVoteRows}</div>${pendingMyVote ? `<p class="help-text">${pendingReset.requested_by === currentUser.id ? 'Your approval is included in the four-vote requirement.' : `Your vote is already recorded: ${pendingMyVote.vote}.`}</p>` : ''}${canVoteOnReset ? `<div class="reset-vote-actions"><button class="danger-button" data-action="data-reset-vote" data-vote="rejected" data-id="${pendingReset.id}">Reject request</button><button class="primary-button" data-action="data-reset-vote" data-vote="approved" data-id="${pendingReset.id}">Approve reset</button></div>` : ''}</div>` : `<button class="danger-button" data-action="request-data-reset">Erase all data</button>`;
+  const resetHistoryRows = resetState.history.length ? resetState.history.map(request => `<div class="reset-history-row"><div><strong>Request #${request.id} · ${escapeHtml(request.requested_by_name)}</strong><small>${dateLabel((request.completed_at || request.created_at || '').slice(0,10))} · ${request.approvals || 0} approvals · ${request.rejections || 0} rejections</small><small>${request.votes.map(vote => `${escapeHtml(vote.display_name)}: ${escapeHtml(vote.vote)}`).join(' · ')}</small></div><div class="reset-history-actions">${statusBadge(request.status)}${request.archive_id ? `<button class="secondary-button" data-action="view-data-reset-archive" data-id="${request.archive_id}">View preserved history</button>` : ''}</div></div>`).join('') : '<p class="help-text reset-no-history">No reset requests have been completed or declined.</p>';
+  const resetSections = `<section class="card section-card data-reset-card"><div class="section-head"><div><h2>Erase all data</h2><p>A household-wide reset requires four approvals: the requester and three other members.</p></div><span class="badge rejected">Destructive action</span></div><p class="data-reset-explanation">The live expense and settlement ledger will be cleared only after the vote passes. Previous records are archived and remain viewable here. Member accounts are kept.</p>${resetRequestPanel}</section><section class="card section-card reset-history-card"><div class="section-head"><div><h2>Reset history</h2><p>Past reset decisions and preserved ledger snapshots.</p></div></div>${resetHistoryRows}</section>`;
   return `${pageHeading('Spending patterns, made clear', 'Monthly reports', 'Monthly activity sits alongside all-time balances; changing the month never resets the ledger.', `<form id="report-filters" class="report-toolbar"><div class="field"><label for="report-month">Month</label><select id="report-month" name="month">${Array.from({length:12},(_,i)=>{const m=String(i+1).padStart(2,'0');return `<option value="${m}" ${month===m?'selected':''}>${new Date(2020,i,1).toLocaleDateString('en-IN',{month:'long'})}</option>`}).join('')}</select></div><div class="field"><label for="report-year">Year</label><input id="report-year" name="year" type="number" min="2000" max="2100" value="${escapeHtml(year)}"></div><button class="primary-button" type="submit">Apply</button><a class="secondary-button" href="/api/reports/export.csv?${search}" download>Export CSV</a></form>`)}
     <div class="report-stats"><article class="card report-stat"><small>Monthly shared expenses</small><strong>${money(data.totals.sharedPaise)}</strong></article><article class="card report-stat"><small>Monthly personal expenses</small><strong>${money(data.totals.personalPaise)}</strong></article></div>
     <div class="report-grid"><section class="card section-card"><div class="section-head"><div><h2>Category breakdown</h2><p>Approved spending during ${new Date(`${year}-${month}-15T12:00:00`).toLocaleDateString('en-IN',{month:'long',year:'numeric'})}.</p></div></div><div class="chart-list">${categoriesChart}</div></section>
       <section class="card section-card"><div class="section-head"><div><h2>Member totals</h2><p>Monthly amount paid and fair share.</p></div></div><div class="members-list">${data.members.map(m => `<div class="member-row" style="grid-template-columns:minmax(110px,1fr) 1fr"><div class="member-ident">${initialsAvatar(m.name)}<strong>${escapeHtml(m.name)}</strong></div><div class="member-stat"><small>Paid · fair share</small><strong>${money(m.totalPaidPaise)} · ${money(m.fairSharePaise)}</strong></div></div>`).join('')}</div></section></div>
     <section class="card section-card" style="margin-bottom:17px"><div class="section-head"><div><h2>Monthly member report</h2><p>Net balance is all-time and includes confirmed settlements.</p></div></div><div class="table-wrap"><table><thead><tr><th>Member</th><th>Shared paid</th><th>Personal paid</th><th>Fair share</th><th>Net balance</th></tr></thead><tbody>${memberRows}</tbody></table></div></section>
-    <section class="card section-card"><div class="section-head"><div><h2>Settlement history</h2><p>Transfers recorded during ${escapeHtml(data.month)}.</p></div></div><div class="table-wrap"><table><thead><tr><th>Date</th><th>Paid by</th><th>Received by</th><th>Amount</th><th>Status</th></tr></thead><tbody>${settlementRows}</tbody></table></div></section>`;
+    <section class="card section-card"><div class="section-head"><div><h2>Settlement history</h2><p>Transfers recorded during ${escapeHtml(data.month)}.</p></div></div><div class="table-wrap"><table><thead><tr><th>Date</th><th>Paid by</th><th>Received by</th><th>Amount</th><th>Status</th></tr></thead><tbody>${settlementRows}</tbody></table></div></section>${resetSections}`;
+}
+
+async function showDataResetArchive(id) {
+  try {
+    const archive = await api(`/api/data-resets/archives/${id}`);
+    const expenseRows = archive.expenses.length ? archive.expenses.map(expense => `<tr><td>${dateLabel(expense.expense_date)}</td><td><strong>${escapeHtml(expense.title)}</strong><small class="archive-subline">${expense.participants.length ? `Shared by: ${expense.participants.map(person => escapeHtml(person.display_name)).join(', ')}` : 'No shared participants'}</small></td><td>${escapeHtml(expense.category)}</td><td>${escapeHtml(expense.paid_by_name)}</td><td class="amount-cell">${money(expense.amount_paise)}</td><td>${expenseBadge(expense.expense_type)}</td><td>${statusBadge(expense.status)}${expense.votes.length ? `<small class="archive-subline">${expense.votes.filter(vote => vote.vote === 'approved').length} approved · ${expense.votes.filter(vote => vote.vote === 'rejected').length} rejected</small>` : ''}</td></tr>`).join('') : '<tr><td colspan="7" class="table-empty">The archived ledger contained no expense records.</td></tr>';
+    const settlementRows = archive.settlements.length ? archive.settlements.map(settlement => `<tr><td>${dateLabel(settlement.payment_date)}</td><td>${escapeHtml(settlement.payer_name)}</td><td>${escapeHtml(settlement.receiver_name)}</td><td class="amount-cell">${money(settledAmount(settlement))}${settlement.status === 'confirmed' && settledAmount(settlement) !== settlement.amount_paise ? `<small class="archive-subline">of ${money(settlement.amount_paise)} requested</small>` : ''}</td><td>${statusBadge(settlement.status)}</td><td>${escapeHtml(settlement.note || '—')}</td></tr>`).join('') : '<tr><td colspan="6" class="table-empty">The archived ledger contained no settlement records.</td></tr>';
+    const modal = document.createElement('div');
+    modal.className = 'modal-backdrop';
+    modal.innerHTML = `<section class="modal reset-archive-modal" role="dialog" aria-modal="true" aria-labelledby="reset-archive-title"><div class="modal-head"><div><div class="eyebrow">Preserved history · ${dateLabel(archive.archivedAt.slice(0,10))}</div><h2 id="reset-archive-title">Ledger archive</h2><p class="help-text">Reset requested by ${escapeHtml(archive.requestedBy)} · ${archive.expenseCount} expenses · ${archive.settlementCount} settlements</p></div><button class="modal-close" data-action="close-modal" aria-label="Close">×</button></div><h3 class="archive-section-title">Expenses</h3><div class="table-wrap"><table><thead><tr><th>Date</th><th>Description</th><th>Category</th><th>Paid by</th><th>Amount</th><th>Type</th><th>Status and votes</th></tr></thead><tbody>${expenseRows}</tbody></table></div><h3 class="archive-section-title">Settlements</h3><div class="table-wrap"><table><thead><tr><th>Date</th><th>Paid by</th><th>Received by</th><th>Confirmed</th><th>Status</th><th>Note</th></tr></thead><tbody>${settlementRows}</tbody></table></div></section>`;
+    app.append(modal);
+  } catch (error) { showToast(error.message, true); }
 }
 
 function renderProfile() {
@@ -480,10 +503,32 @@ app.addEventListener('click', async event => {
   if (action === 'open-notification') {
     try { await api(`/api/notifications/${button.dataset.id}/read`, { method: 'PATCH', body: '{}' }); } catch {}
     notificationOpen = false;
-    location.hash = button.dataset.related === 'settlement' ? '#settlements' : '#approvals';
+    location.hash = button.dataset.related === 'settlement' ? '#settlements' : button.dataset.related === 'data_reset' ? '#reports' : '#approvals';
     return;
   }
   if (action === 'details') return showExpenseDetails(button.dataset.id);
+  if (action === 'view-data-reset-archive') return showDataResetArchive(button.dataset.id);
+  if (action === 'request-data-reset') {
+    if (!window.confirm('Request a household-wide data reset? Your vote counts as one approval. The live ledger is cleared only after three other members approve, and its history is archived.')) return;
+    button.disabled = true;
+    try {
+      const result = await api('/api/data-resets', { method: 'POST', body: '{}' });
+      await loadRoute({ background: true });
+      showToast(result.message);
+    } catch (error) { button.disabled = false; showToast(error.message, true); }
+    return;
+  }
+  if (action === 'data-reset-vote') {
+    const vote = button.dataset.vote;
+    if (vote === 'approved' && !window.confirm('Approve this household-wide reset? After four total approvals, the live ledger will be cleared and archived.')) return;
+    button.disabled = true;
+    try {
+      const result = await api(`/api/data-resets/${button.dataset.id}/vote`, { method: 'POST', body: JSON.stringify({ vote }) });
+      await loadRoute({ background: true });
+      showToast(result.message);
+    } catch (error) { button.disabled = false; showToast(error.message, true); }
+    return;
+  }
   if (action === 'settlement-action') return openSettlementModal(button);
   if (action === 'close-modal') { button.closest('.modal-backdrop')?.remove(); return; }
   if (action === 'retry') return loadRoute();
@@ -543,7 +588,7 @@ setInterval(async () => {
     window.__unread = data.unread;
     updateUnreadBadge();
     const route = currentRoute;
-    const endpoints = { dashboard: '/api/dashboard', approvals: '/api/approvals', settlements: '/api/settlements' };
+    const endpoints = { dashboard: '/api/dashboard', approvals: '/api/approvals', settlements: '/api/settlements', reports: '/api/data-resets' };
     if (endpoints[route] && !document.querySelector('.modal-backdrop')) {
       const snapshot = await api(endpoints[route]);
       const signature = liveSnapshot(route, snapshot);

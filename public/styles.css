@@ -195,6 +195,28 @@ td strong { font-weight: 600; }
 .report-stat small { color: var(--muted); font-size: 10px; }
 .report-stat strong { display: block; font: 800 20px Manrope; margin-top: 8px; }
 .report-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(270px,.7fr); gap: 17px; align-items: start; margin-bottom: 17px; }
+.data-reset-card, .reset-history-card { margin-top: 17px; }
+.data-reset-card > .section-head { padding-bottom: 12px; }
+.data-reset-explanation { color: var(--muted); font-size: 11px; line-height: 1.6; margin: 0 21px 16px; max-width: 760px; }
+.data-reset-card > .danger-button { margin: 0 21px 21px; }
+.badge.completed { color: var(--green); background: var(--green-soft); }
+.reset-pending-panel { margin: 0 21px 21px; padding: 16px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface-soft); }
+.reset-request-head, .reset-vote-row, .reset-history-row { display: flex; justify-content: space-between; align-items: center; gap: 14px; }
+.reset-request-head > div, .reset-history-row > div:first-child { display: grid; gap: 5px; }
+.reset-request-head strong, .reset-history-row strong { font-size: 12px; }
+.reset-request-head small, .reset-history-row small { color: var(--muted); font-size: 10px; }
+.reset-vote-counts { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: 14px 0 10px; color: var(--muted); font-size: 10px; }
+.reset-vote-counts strong { color: var(--ink); font-size: 12px; }
+.reset-vote-list { border-top: 1px solid var(--line); }
+.reset-vote-row { padding: 9px 0; border-bottom: 1px solid var(--line); color: var(--ink); font-size: 11px; }
+.reset-pending-panel .help-text { margin: 12px 0 0; }
+.reset-vote-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 14px; }
+.reset-history-row { padding: 14px 21px; border-top: 1px solid var(--line); }
+.reset-history-actions { display: flex; align-items: center; gap: 10px; }
+.reset-no-history { padding: 0 21px 19px; }
+.reset-archive-modal { width: min(1050px,100%); }
+.archive-section-title { font: 700 13px Manrope; margin: 18px 0 8px; }
+.archive-subline { display: block; color: var(--muted); font-size: 9px; margin-top: 4px; white-space: normal; max-width: 250px; }
 .chart-list { padding: 0 20px 18px; }
 .chart-row { margin-top: 14px; }
 .chart-label { display: flex; justify-content: space-between; gap: 8px; color: #657168; font-size: 10px; margin-bottom: 6px; }
@@ -257,6 +279,7 @@ body.dark td, body.dark .member-row, body.dark .suggestion-row, body.dark .notif
 body.dark .member-ident strong, body.dark .section-head h2, body.dark .section-head h3, body.dark .summary-value, body.dark .summary-foot, body.dark .approval-card h3, body.dark .amount-cell, body.dark .form-aside h3, body.dark .settlement-form h2, body.dark .modal-head h2 { color: var(--ink); }
 body.dark .login-page { background: var(--bg); }
 body.dark .full-amount-option { background: #202d25; border-color: var(--line); color: #d7e3da; }
+body.dark .reset-pending-panel { background: var(--surface-soft); border-color: var(--line); }
 body.dark .login-art { background: #1c3024; }
 body.dark .login-art-copy h1, body.dark .login-box h2 { color: var(--ink); }
 body.dark .illus-card { background: #24372b; border-color: var(--line); }
@@ -324,6 +347,18 @@ body.dark .illus-card { background: #24372b; border-color: var(--line); }
   .report-toolbar .field { flex: 1; min-width: 0; }
   .report-toolbar .primary-button { padding: 10px; }
   .report-stats { gap: 8px; }
+  .data-reset-card .section-head { align-items: flex-start; }
+  .data-reset-explanation { margin: 0 16px 14px; }
+  .data-reset-card > .danger-button { margin: 0 16px 16px; width: calc(100% - 32px); }
+  .reset-pending-panel { margin: 0 16px 16px; padding: 13px; }
+  .reset-request-head, .reset-history-row { align-items: flex-start; }
+  .reset-vote-actions { flex-direction: column-reverse; }
+  .reset-vote-actions button { width: 100%; }
+  .reset-history-row { flex-direction: column; padding: 13px 16px; }
+  .reset-history-actions { width: 100%; justify-content: space-between; flex-wrap: wrap; }
+  .reset-history-actions .secondary-button { flex: 1; }
+  .reset-archive-modal { padding: 17px; }
+  .archive-subline { max-width: 180px; }
   .report-stat { padding: 14px; }
   .report-stat strong { font-size: 17px; }
   .totals-strip > div { padding: 12px 10px; }

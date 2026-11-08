@@ -128,6 +128,18 @@ app.patch('/api/notifications/:id/read', ...protectedApi, (req, res) => {
   res.json({ ok: true });
 });
 
+app.get('/api/data-resets', ...protectedApi, (req, res) => res.json(service.getDataResetState(db)));
+app.post('/api/data-resets', ...protectedApi, (req, res) => {
+  const id = service.createDataResetRequest(db, req.session.user.id);
+  res.status(201).json({ id, message: 'Reset request created. Your approval counts; three other members must approve it.' });
+});
+app.post('/api/data-resets/:id/vote', ...protectedApi, (req, res) => {
+  res.json(service.voteOnDataReset(db, req.session.user.id, Number(req.params.id), req.body.vote));
+});
+app.get('/api/data-resets/archives/:id', ...protectedApi, (req, res) => {
+  res.json(service.getDataResetArchive(db, Number(req.params.id)));
+});
+
 app.get('/api/reports', ...protectedApi, (req, res) => {
   const current = service.currentHouseholdMonth().split('-');
   res.json(service.getReport(db, req.query.year || current[0], req.query.month || current[1]));
