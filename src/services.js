@@ -259,7 +259,7 @@ async function getApprovals(db, actorId) {
     SUM(CASE WHEN v.vote='rejected' THEN 1 ELSE 0 END) AS rejections,
     MAX(CASE WHEN v.user_id=? THEN v.vote ELSE NULL END) AS my_vote
     FROM expenses e JOIN users u ON u.id=e.paid_by LEFT JOIN expense_votes v ON v.expense_id=e.id
-    WHERE e.status='pending' GROUP BY e.id ORDER BY e.created_at DESC`).all(actorId);
+    WHERE e.status='pending' GROUP BY e.id,u.display_name ORDER BY e.created_at DESC`).all(actorId);
   const history = await db.prepare(`SELECT e.id,e.title,e.amount_paise,e.category,e.expense_date,e.expense_type,e.status,e.rejection_reason,u.display_name AS paid_by_name,
     (SELECT SUM(vote='approved') FROM expense_votes WHERE expense_id=e.id) AS approvals,
     (SELECT SUM(vote='rejected') FROM expense_votes WHERE expense_id=e.id) AS rejections

@@ -32,6 +32,13 @@ test('PostgreSQL adapter rewrites SQLite placeholders and expressions safely', (
   assert.equal(toPostgresSql("SELECT SUM(vote='approved'), datetime('now') FROM expense_votes"), "SELECT SUM(CASE WHEN vote='approved' THEN 1 ELSE 0 END), CURRENT_TIMESTAMP FROM expense_votes");
 });
 
+test('approval aggregation groups the joined member name for PostgreSQL', async () => {
+  const queries = [];
+  const fakeDb = { prepare(sql) { queries.push(sql); return { all: async () => [] }; } };
+  await service.getApprovals(fakeDb, 1);
+  assert.match(queries[0], /GROUP BY e\.id,u\.display_name/);
+});
+
 test('expense creation is pending and creates review notifications for the other four members', async t => {
   const db = fixture(); t.after(() => db.close());
   const id = await submit(db);

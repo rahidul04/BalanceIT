@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 process.env.DATABASE_PATH = ':memory:';
+process.env.DATABASE_URL = '';
 const bcrypt = require('bcryptjs');
 const { app, db } = require('../src/server');
 
@@ -30,6 +31,9 @@ test('session authentication protects private API and the voting flow works end 
   const dashboard = await fetch(`${base}/api/dashboard`, { headers: { cookie: member1 } });
   assert.equal(dashboard.status, 200);
   assert.equal((await dashboard.json()).members.length, 5);
+  const publicMembers = await fetch(`${base}/api/members`, { headers: { cookie: member1 } });
+  assert.equal(publicMembers.status, 200);
+  assert.equal((await publicMembers.json())[0].displayName, 'Member 1');
 
   const unauthenticatedWrite = await fetch(`${base}/api/expenses`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
   assert.equal(unauthenticatedWrite.status, 401);

@@ -67,7 +67,7 @@ app.post('/api/auth/logout', ...protectedApi, (req, res) => req.session.destroy(
 }));
 
 app.get('/api/dashboard', ...protectedApi, asyncRoute(async (req, res) => res.json(await service.getDashboard(db, req.session.user.id))));
-app.get('/api/members', ...protectedApi, asyncRoute(async (req, res) => res.json(await db.prepare('SELECT id,username,display_name AS displayName FROM users ORDER BY id').all())));
+app.get('/api/members', ...protectedApi, asyncRoute(async (req, res) => res.json(await db.prepare('SELECT id,username,display_name AS "displayName" FROM users ORDER BY id').all())));
 app.get('/api/expenses', ...protectedApi, asyncRoute(async (req, res) => res.json(await service.listExpenses(db, req.query))));
 app.get('/api/expenses/:id', ...protectedApi, asyncRoute(async (req, res) => {
   const expense = await service.expenseWithPayer(db, Number(req.params.id));
