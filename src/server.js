@@ -79,7 +79,7 @@ app.post('/api/expenses', ...protectedApi, asyncRoute(async (req, res) => {
   try { amountPaise = parseRupeesToPaise(req.body.amount); }
   catch (error) { return res.status(400).json({ error: error.message }); }
   const id = await service.createExpense(db, req.session.user.id, { ...req.body, amountPaise });
-  res.status(201).json({ id, message: 'Expense submitted. It is awaiting approval from the other members.' });
+  res.status(201).json({ id, message: 'Expense submitted. It is awaiting approval from the selected participants.' });
 }));
 
 app.get('/api/approvals', ...protectedApi, asyncRoute(async (req, res) => res.json(await service.getApprovals(db, req.session.user.id))));

@@ -48,10 +48,23 @@ test('session authentication protects private API and the voting flow works end 
   });
   assert.equal(created.status, 201);
   const expenseId = (await created.json()).id;
+  const approvalPage = await fetch(`${base}/api/approvals`, { headers: { cookie: member1 } });
+  assert.equal(approvalPage.status, 200);
+  const approvalData = await approvalPage.json();
+  assert.equal(approvalData.pending[0].approvals, 1);
+  assert.equal(approvalData.pending[0].approvals_required, 3);
+
   const ownVote = await fetch(`${base}/api/approvals/${expenseId}/vote`, { method: 'POST', headers: { ...origin, 'content-type': 'application/json' }, body: JSON.stringify({ vote: 'approved' }) });
   assert.equal(ownVote.status, 403);
 
-  for (const member of [2, 3, 4]) {
+  const member4 = await login(4);
+  const nonParticipantVote = await fetch(`${base}/api/approvals/${expenseId}/vote`, {
+    method: 'POST', headers: { origin: base, cookie: member4, 'content-type': 'application/json' },
+    body: JSON.stringify({ vote: 'approved' })
+  });
+  assert.equal(nonParticipantVote.status, 403);
+
+  for (const member of [2, 3]) {
     const cookie = await login(member);
     const vote = await fetch(`${base}/api/approvals/${expenseId}/vote`, {
       method: 'POST', headers: { origin: base, cookie, 'content-type': 'application/json' },

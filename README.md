@@ -38,7 +38,7 @@ For a fresh setup, configure the five usernames and passwords before the first s
 
 - Five configured accounts, login rate limiting, bcrypt hashes, database-backed server sessions, HTTP-only SameSite cookies, and no public registration.
 - Shared and personal expenses. Shared expenses split equally among selected participants; remainder paise go to the lowest member IDs first.
-- Four independent votes per expense. Three approvals approve, two rejections reject, submitters cannot vote, and a unique database constraint prevents repeat votes.
+- Shared expenses are reviewed only by their selected participants. The submitter must be selected and counts as one approval; groups of 2–4 require unanimous approval, while a five-person group needs four approvals total. A rejection makes a 2–4-person group impossible to approve; two rejections close a five-person group. Personal expenses still use three approvals from the other four. Unique database constraints prevent repeat votes.
 - Pending expenses never affect the ledger. Personal expenses are approved and reported but excluded from shared fair shares and balances.
 - Backend paise calculations, all-time member balances, minimum-count transfers for the five-member balance set, payer-requested/receiver-confirmed payments, immediate received-payment records, notifications, filtering, monthly reports, and CSV export.
 - Reports-page data reset requests require four approvals total (the requester plus three other members). Two rejections close the request. On approval, the active expense and settlement ledger is archived for review, then cleared; the five accounts and reset audit history remain.

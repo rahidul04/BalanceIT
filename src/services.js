@@ -27,11 +27,15 @@ async function notify(db, userId, title, message, relatedType, relatedId) {
     .run(userId, title, message, relatedType, relatedId);
 }
 
-async function tallyVotes(db, expenseId) {
-  return await db.prepare(`SELECT
+async function tallyVotes(db, expenseId, eligibleUserIds) {
+  if (eligibleUserIds && eligibleUserIds.length === 0) return { approvals: 0, rejections: 0 };
+  const voterFilter = eligibleUserIds ? ` AND user_id IN (${eligibleUserIds.map(() => '?').join(',')})` : '';
+  const params = eligibleUserIds ? [expenseId, ...eligibleUserIds] : [expenseId];
+  const tally = await db.prepare(`SELECT
       SUM(CASE WHEN vote='approved' THEN 1 ELSE 0 END) AS approvals,
       SUM(CASE WHEN vote='rejected' THEN 1 ELSE 0 END) AS rejections
-    FROM expense_votes WHERE expense_id=?`).get(expenseId);
+    FROM expense_votes WHERE expense_id=?${voterFilter}`).get(...params);
+  return { approvals: Number(tally?.approvals) || 0, rejections: Number(tally?.rejections) || 0 };
 }
 
 async function createExpense(db, actorId, body) {
@@ -50,8 +54,9 @@ async function createExpense(db, actorId, body) {
   let participants = [];
   if (type === 'shared') {
     const requested = Array.isArray(body.participantIds) ? body.participantIds.map(Number) : [];
-    if (!requested.length || requested.some(id => !allUsers.includes(id))) fail('Select one or more valid participants.');
+    if (requested.length < 2 || requested.some(id => !allUsers.includes(id))) fail('A shared expense needs at least two valid participants.');
     if (new Set(requested).size !== requested.length) fail('A participant can only be selected once.');
+    if (!requested.includes(actorId)) fail('Include yourself in the split. Your submission counts as your approval.');
     participants = allocateShares(amountPaise, requested);
   }
   const insert = db.transaction(async () => {
@@ -60,7 +65,10 @@ async function createExpense(db, actorId, body) {
     const expenseId = Number(result.lastInsertRowid);
     for (const participant of participants) await db.prepare('INSERT INTO expense_participants(expense_id,user_id,share_paise) VALUES(?,?,?)').run(expenseId, participant.userId, participant.sharePaise);
     const name = (await db.prepare('SELECT display_name FROM users WHERE id=?').get(actorId)).display_name;
-    for (const userId of allUsers.filter(id => id !== actorId)) {
+    const approvalRecipients = type === 'shared'
+      ? participants.map(participant => participant.userId).filter(id => id !== actorId)
+      : allUsers.filter(id => id !== actorId);
+    for (const userId of approvalRecipients) {
       await notify(db, userId, 'Expense needs your review', `${name} submitted “${title}” for approval.`, 'expense', expenseId);
     }
     return expenseId;
@@ -70,14 +78,31 @@ async function createExpense(db, actorId, body) {
 
 async function voteOnExpense(db, actorId, expenseId, vote, reason = '') {
   if (!['approved', 'rejected'].includes(vote)) fail('Choose approve or reject.');
-  const expense = await db.prepare('SELECT * FROM expenses WHERE id=?').get(expenseId);
-  if (!expense) fail('Expense not found.', 404);
-  if (expense.paid_by === actorId) fail('You cannot vote on an expense you submitted.', 403);
-  if (expense.status !== 'pending') fail('This expense is no longer awaiting approval.', 409);
-  const userCount = (await db.prepare('SELECT COUNT(*) AS count FROM users').get()).count;
-  if (userCount !== 5) fail('BalanceIT must be configured with exactly five members.', 500);
   const cleanReason = vote === 'rejected' ? String(reason || '').trim().slice(0, 250) : null;
   const apply = db.transaction(async () => {
+    // Serialize votes per expense. PostgreSQL locks this row; SQLite begins the
+    // transaction with BEGIN IMMEDIATE, so a vote cannot slip in after closure.
+    const lock = db.isPostgres ? ' FOR UPDATE' : '';
+    const expense = await db.prepare(`SELECT * FROM expenses WHERE id=?${lock}`).get(expenseId);
+    if (!expense) fail('Expense not found.', 404);
+    if (expense.paid_by === actorId) fail('You cannot vote on an expense you submitted.', 403);
+    if (expense.status !== 'pending') fail('This expense is no longer awaiting approval.', 409);
+    const allUsers = (await db.prepare('SELECT id FROM users ORDER BY id').all()).map(user => user.id);
+    if (allUsers.length !== 5) fail('BalanceIT must be configured with exactly five members.', 500);
+    let eligibleVoters;
+    let automaticApprovals = 0;
+    let approvalsRequired = 3;
+    if (expense.expense_type === 'shared') {
+      const participantIds = (await db.prepare('SELECT user_id FROM expense_participants WHERE expense_id=? ORDER BY user_id').all(expenseId)).map(row => row.user_id);
+      if (!participantIds.includes(actorId)) fail('Only members included in this expense can vote on it.', 403);
+      const approvalGroupSize = participantIds.length + (participantIds.includes(expense.paid_by) ? 0 : 1);
+      if (approvalGroupSize < 2 || approvalGroupSize > 5) fail('This shared expense has an invalid participant group.', 500);
+      automaticApprovals = 1; // The selected submitter counts as an approval, but never casts a stored vote.
+      approvalsRequired = approvalGroupSize === 5 ? 4 : approvalGroupSize;
+      eligibleVoters = participantIds.filter(userId => userId !== expense.paid_by);
+    } else {
+      eligibleVoters = allUsers.filter(userId => userId !== expense.paid_by);
+    }
     try {
       await db.prepare('INSERT INTO expense_votes(expense_id,user_id,vote,rejection_reason) VALUES(?,?,?,?)')
         .run(expenseId, actorId, vote, cleanReason);
@@ -85,13 +110,18 @@ async function voteOnExpense(db, actorId, expenseId, vote, reason = '') {
       if (/UNIQUE constraint failed: expense_votes\.expense_id, expense_votes\.user_id/i.test(error.message || '') || (error.code === '23505' && error.constraint === 'expense_votes_expense_id_user_id_key')) fail('You have already voted on this expense.', 409);
       throw error;
     }
-    const tally = await tallyVotes(db, expenseId);
+    const tally = await tallyVotes(db, expenseId, eligibleVoters);
+    const approvals = automaticApprovals + tally.approvals;
+    const rejectionsRequired = expense.expense_type === 'shared'
+      ? (eligibleVoters.length + automaticApprovals === 5 ? 2 : 1)
+      : 2;
     let status = 'pending';
     let rejectionReason = null;
-    if (tally.approvals >= 3) status = 'approved';
-    else if (tally.rejections >= 2) {
+    if (approvals >= approvalsRequired) status = 'approved';
+    else if (tally.rejections >= rejectionsRequired || approvals + eligibleVoters.length - tally.approvals - tally.rejections < approvalsRequired) {
       status = 'rejected';
-      rejectionReason = (await db.prepare(`SELECT rejection_reason FROM expense_votes WHERE expense_id=? AND vote='rejected' AND rejection_reason IS NOT NULL AND rejection_reason!='' ORDER BY created_at LIMIT 1`).get(expenseId))?.rejection_reason || null;
+      const reasonParams = [expenseId, ...eligibleVoters];
+      rejectionReason = (await db.prepare(`SELECT rejection_reason FROM expense_votes WHERE expense_id=? AND vote='rejected' AND rejection_reason IS NOT NULL AND rejection_reason!='' AND user_id IN (${eligibleVoters.map(() => '?').join(',')}) ORDER BY created_at LIMIT 1`).get(...reasonParams))?.rejection_reason || null;
     }
     if (status !== 'pending') {
       await db.prepare("UPDATE expenses SET status=?, rejection_reason=?, updated_at=datetime('now') WHERE id=? AND status='pending'")
@@ -103,7 +133,7 @@ async function voteOnExpense(db, actorId, expenseId, vote, reason = '') {
         : `Your expense “${expense.title}” was rejected${rejectionReason ? `: ${rejectionReason}` : '.'}`;
       await notify(db, submitter, title, message, 'expense', expenseId);
     }
-    return { status, approvals: tally.approvals || 0, rejections: tally.rejections || 0 };
+    return { status, approvals, rejections: tally.rejections, approvalsRequired };
   });
   return await apply();
 }
@@ -220,10 +250,15 @@ async function getDashboard(db, actorId) {
 async function expenseWithPayer(db, id) {
   const expense = await db.prepare(`SELECT e.*,u.display_name AS paid_by_name,u.username AS paid_by_username FROM expenses e JOIN users u ON u.id=e.paid_by WHERE e.id=?`).get(id);
   if (!expense) return null;
-  const tally = await tallyVotes(db, id);
-  expense.approvals = tally.approvals || 0;
-  expense.rejections = tally.rejections || 0;
   expense.participants = await db.prepare(`SELECT u.id,u.display_name AS name,ep.share_paise FROM expense_participants ep JOIN users u ON u.id=ep.user_id WHERE ep.expense_id=? ORDER BY u.id`).all(id);
+  const eligibleVoters = expense.expense_type === 'shared'
+    ? expense.participants.map(participant => participant.id).filter(userId => userId !== expense.paid_by)
+    : (await db.prepare('SELECT id FROM users WHERE id!=? ORDER BY id').all(expense.paid_by)).map(user => user.id);
+  const tally = await tallyVotes(db, id, eligibleVoters);
+  expense.approvals = tally.approvals + (expense.expense_type === 'shared' ? 1 : 0);
+  expense.rejections = tally.rejections;
+  const approvalGroupSize = expense.participants.length + (expense.participants.some(participant => participant.id === expense.paid_by) ? 0 : 1);
+  expense.approvals_required = expense.expense_type === 'personal' ? 3 : (approvalGroupSize === 5 ? 4 : approvalGroupSize);
   expense.votes = await db.prepare(`SELECT v.user_id,u.display_name AS name,v.vote,v.rejection_reason,v.created_at FROM expense_votes v JOIN users u ON u.id=v.user_id WHERE v.expense_id=? ORDER BY v.created_at`).all(id);
   return expense;
 }
@@ -253,13 +288,31 @@ async function listExpenses(db, query = {}) {
 }
 
 async function getApprovals(db, actorId) {
-  const pending = await db.prepare(`SELECT e.id,e.title,e.amount_paise,e.category,e.expense_date,e.expense_type,e.paid_by,e.status,
-    u.display_name AS paid_by_name,
-    SUM(CASE WHEN v.vote='approved' THEN 1 ELSE 0 END) AS approvals,
-    SUM(CASE WHEN v.vote='rejected' THEN 1 ELSE 0 END) AS rejections,
-    MAX(CASE WHEN v.user_id=? THEN v.vote ELSE NULL END) AS my_vote
-    FROM expenses e JOIN users u ON u.id=e.paid_by LEFT JOIN expense_votes v ON v.expense_id=e.id
-    WHERE e.status='pending' GROUP BY e.id,u.display_name ORDER BY e.created_at DESC`).all(actorId);
+  const pending = await db.prepare(`WITH pending_expenses AS (
+    SELECT e.id,e.title,e.amount_paise,e.category,e.expense_date,e.expense_type,e.paid_by,e.status,e.created_at,
+      u.display_name AS paid_by_name,
+      (SELECT COUNT(*) FROM expense_participants ep WHERE ep.expense_id=e.id) AS participant_count,
+      CASE WHEN EXISTS(SELECT 1 FROM expense_participants ep WHERE ep.expense_id=e.id AND ep.user_id=e.paid_by) THEN 1 ELSE 0 END AS payer_is_participant
+    FROM expenses e JOIN users u ON u.id=e.paid_by WHERE e.status='pending'
+  )
+  SELECT p.*,
+    CASE WHEN p.expense_type='shared' THEN 1 ELSE 0 END +
+      (SELECT COUNT(*) FROM expense_votes v WHERE v.expense_id=p.id AND v.vote='approved' AND v.user_id!=p.paid_by
+        AND (p.expense_type='personal' OR EXISTS(SELECT 1 FROM expense_participants ep WHERE ep.expense_id=p.id AND ep.user_id=v.user_id))) AS approvals,
+    (SELECT COUNT(*) FROM expense_votes v WHERE v.expense_id=p.id AND v.vote='rejected' AND v.user_id!=p.paid_by
+      AND (p.expense_type='personal' OR EXISTS(SELECT 1 FROM expense_participants ep WHERE ep.expense_id=p.id AND ep.user_id=v.user_id))) AS rejections,
+    (SELECT v.vote FROM expense_votes v WHERE v.expense_id=p.id AND v.user_id=? LIMIT 1) AS my_vote,
+    p.participant_count + CASE WHEN p.payer_is_participant=1 THEN 0 ELSE 1 END AS approval_group_size,
+    CASE WHEN p.expense_type='personal' THEN 3
+      WHEN p.participant_count + CASE WHEN p.payer_is_participant=1 THEN 0 ELSE 1 END=5 THEN 4
+      ELSE p.participant_count + CASE WHEN p.payer_is_participant=1 THEN 0 ELSE 1 END END AS approvals_required,
+    CASE WHEN p.expense_type='personal' THEN 2
+      WHEN p.participant_count + CASE WHEN p.payer_is_participant=1 THEN 0 ELSE 1 END=5 THEN 2
+      ELSE 1 END AS rejections_required,
+    CASE WHEN p.paid_by!=? AND (p.expense_type='personal' OR EXISTS(
+      SELECT 1 FROM expense_participants ep WHERE ep.expense_id=p.id AND ep.user_id=?
+    )) THEN 1 ELSE 0 END AS can_vote
+  FROM pending_expenses p ORDER BY p.created_at DESC`).all(actorId, actorId, actorId);
   const history = await db.prepare(`SELECT e.id,e.title,e.amount_paise,e.category,e.expense_date,e.expense_type,e.status,e.rejection_reason,u.display_name AS paid_by_name,
     (SELECT SUM(vote='approved') FROM expense_votes WHERE expense_id=e.id) AS approvals,
     (SELECT SUM(vote='rejected') FROM expense_votes WHERE expense_id=e.id) AS rejections

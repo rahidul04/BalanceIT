@@ -13,7 +13,15 @@ function fixture() {
   return db;
 }
 
-async function approve(db, expenseId, voters = [2, 3, 4]) {
+async function approve(db, expenseId, voters) {
+  if (!voters) {
+    const expense = await db.prepare('SELECT paid_by,expense_type FROM expenses WHERE id=?').get(expenseId);
+    if (expense.expense_type === 'personal') {
+      voters = (await db.prepare('SELECT id FROM users WHERE id!=? ORDER BY id LIMIT 3').all(expense.paid_by)).map(row => row.id);
+    } else {
+      voters = (await db.prepare('SELECT user_id FROM expense_participants WHERE expense_id=? AND user_id!=? ORDER BY user_id').all(expenseId, expense.paid_by)).map(row => row.user_id);
+    }
+  }
   let state;
   for (const userId of voters) state = await service.voteOnExpense(db, userId, expenseId, 'approved');
   return state;
@@ -32,40 +40,46 @@ test('PostgreSQL adapter rewrites SQLite placeholders and expressions safely', (
   assert.equal(toPostgresSql("SELECT SUM(vote='approved'), datetime('now') FROM expense_votes"), "SELECT SUM(CASE WHEN vote='approved' THEN 1 ELSE 0 END), CURRENT_TIMESTAMP FROM expense_votes");
 });
 
-test('approval aggregation groups the joined member name for PostgreSQL', async () => {
+test('approval page query exposes group quorum and voter eligibility', async () => {
   const queries = [];
   const fakeDb = { prepare(sql) { queries.push(sql); return { all: async () => [] }; } };
   await service.getApprovals(fakeDb, 1);
-  assert.match(queries[0], /GROUP BY e\.id,u\.display_name/);
+  assert.match(queries[0], /approvals_required/);
+  assert.match(queries[0], /can_vote/);
 });
 
-test('expense creation is pending and creates review notifications for the other four members', async t => {
+test('expense creation is pending and notifies only the other selected participant', async t => {
   const db = fixture(); t.after(() => db.close());
   const id = await submit(db);
   assert.equal((await db.prepare('SELECT status FROM expenses WHERE id=?').get(id)).status, 'pending');
-  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM notifications WHERE related_id=?').get(id)).n, 4);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM notifications WHERE related_id=?').get(id)).n, 1);
+  assert.deepEqual((await db.prepare('SELECT user_id FROM notifications WHERE related_id=?').all(id)).map(row => row.user_id), [2]);
   assert.deepEqual((await db.prepare('SELECT share_paise FROM expense_participants WHERE expense_id=? ORDER BY user_id').all(id)).map(r => r.share_paise), [5000, 5000]);
 });
 
 test('duplicate votes are blocked by the service and database unique constraint', async t => {
   const db = fixture(); t.after(() => db.close());
-  const id = await submit(db);
+  const id = await submit(db, 1, { participantIds: [1, 2, 3, 4, 5] });
   await service.voteOnExpense(db, 2, id, 'approved');
   await assert.rejects(service.voteOnExpense(db, 2, id, 'approved'), /already voted/);
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM expense_votes WHERE expense_id=?').get(id)).n, 1);
 });
 
-test('three distinct approvals approve an expense', async t => {
+test('a five-person group needs four approvals total, including the submitter', async t => {
   const db = fixture(); t.after(() => db.close());
-  const id = await submit(db);
+  const id = await submit(db, 1, { participantIds: [1, 2, 3, 4, 5] });
   assert.equal((await service.voteOnExpense(db, 2, id, 'approved')).status, 'pending');
   assert.equal((await service.voteOnExpense(db, 3, id, 'approved')).status, 'pending');
-  assert.equal((await service.voteOnExpense(db, 4, id, 'approved')).status, 'approved');
+  const result = await service.voteOnExpense(db, 4, id, 'approved');
+  assert.equal(result.status, 'approved');
+  assert.equal(result.approvals, 4);
+  await assert.rejects(service.voteOnExpense(db, 5, id, 'approved'), /no longer awaiting approval/);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM expense_votes WHERE expense_id=?').get(id)).n, 3);
 });
 
 test('two rejections reject an expense and preserve the reason', async t => {
   const db = fixture(); t.after(() => db.close());
-  const id = await submit(db);
+  const id = await submit(db, 1, { participantIds: [1, 2, 3, 4, 5] });
   await service.voteOnExpense(db, 2, id, 'rejected', 'Please attach the receipt.');
   const result = await service.voteOnExpense(db, 3, id, 'rejected', '');
   assert.equal(result.status, 'rejected');
@@ -76,6 +90,56 @@ test('expense submitter cannot approve their own expense', async t => {
   const db = fixture(); t.after(() => db.close());
   const id = await submit(db);
   await assert.rejects(service.voteOnExpense(db, 1, id, 'approved'), /cannot vote/);
+});
+
+test('a three-person shared expense requests only its members and requires all three including the submitter', async t => {
+  const db = fixture(); t.after(() => db.close());
+  const id = await submit(db, 1, { participantIds: [1, 2, 3] });
+  const recipients = await db.prepare('SELECT user_id FROM notifications WHERE related_id=? ORDER BY user_id').all(id);
+  assert.deepEqual(recipients.map(row => row.user_id), [2, 3]);
+
+  let approvals = await service.getApprovals(db, 4);
+  assert.equal(approvals.pending[0].approvals, 1, 'the submitter counts as the first approval');
+  assert.equal(approvals.pending[0].approvals_required, 3);
+  assert.equal(approvals.pending[0].can_vote, 0);
+  approvals = await service.getApprovals(db, 2);
+  assert.equal(approvals.pending[0].can_vote, 1);
+
+  await assert.rejects(service.voteOnExpense(db, 4, id, 'approved'), /Only members included/);
+  assert.equal((await service.voteOnExpense(db, 2, id, 'approved')).status, 'pending');
+  const result = await service.voteOnExpense(db, 3, id, 'approved');
+  assert.equal(result.status, 'approved');
+  assert.equal(result.approvals, 3);
+  const shares = await db.prepare('SELECT user_id,share_paise FROM expense_participants WHERE expense_id=? ORDER BY user_id').all(id);
+  assert.deepEqual(shares.map(row => row.user_id), [1, 2, 3]);
+  assert.equal(shares.reduce((sum, row) => sum + row.share_paise, 0), 10000);
+});
+
+test('a four-person shared expense requires all four approvals and rejects after the first no vote', async t => {
+  const db = fixture(); t.after(() => db.close());
+  const id = await submit(db, 1, { participantIds: [1, 2, 3, 4] });
+  assert.equal((await service.getApprovals(db, 2)).pending[0].approvals_required, 4);
+  const result = await service.voteOnExpense(db, 2, id, 'rejected', 'Not included in this purchase.');
+  assert.equal(result.status, 'rejected');
+  assert.equal(result.approvals, 1);
+  assert.equal(result.rejections, 1);
+});
+
+test('a four-person shared expense approves only after every selected participant has approved', async t => {
+  const db = fixture(); t.after(() => db.close());
+  const id = await submit(db, 1, { participantIds: [1, 2, 3, 4] });
+  assert.equal((await service.voteOnExpense(db, 2, id, 'approved')).status, 'pending');
+  assert.equal((await service.voteOnExpense(db, 3, id, 'approved')).status, 'pending');
+  const result = await service.voteOnExpense(db, 4, id, 'approved');
+  assert.equal(result.status, 'approved');
+  assert.equal(result.approvals, 4);
+  assert.deepEqual((await db.prepare("SELECT user_id FROM notifications WHERE related_id=? AND title='Expense needs your review' ORDER BY user_id").all(id)).map(row => row.user_id), [2, 3, 4]);
+});
+
+test('shared expense submissions must include the payer and at least one other participant', async t => {
+  const db = fixture(); t.after(() => db.close());
+  await assert.rejects(submit(db, 1, { participantIds: [1] }), /at least two/);
+  await assert.rejects(submit(db, 1, { participantIds: [2, 3] }), /Include yourself/);
 });
 
 test('equal split and deterministic paise remainder preserve the full amount', () => {
@@ -159,7 +223,7 @@ test('receiver can mark a partial amount received immediately without an approva
   assert.equal(settlement.amount_paise, 2500);
   assert.equal(settlement.confirmed_amount_paise, 2500);
   assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM settlements WHERE status='pending_confirmation'").get()).n, 0);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM expense_votes WHERE expense_id=?").get(expense)).n, 3);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM expense_votes WHERE expense_id=?").get(expense)).n, 1);
   const snapshot = await service.financeSnapshot(db);
   assert.equal(snapshot.members[0].netBalancePaise, 2500);
   assert.equal(snapshot.members[1].netBalancePaise, -2500);
@@ -249,7 +313,7 @@ test('data reset waits for requester plus three other approvals, archives histor
   assert.equal(archive.expenseCount, 1);
   assert.equal(archive.settlementCount, 1);
   assert.equal(archive.expenses[0].id, expenseId);
-  assert.equal(archive.expenses[0].votes.length, 3);
+  assert.equal(archive.expenses[0].votes.length, 1);
   assert.equal(archive.settlements[0].id, settlementId);
   const state = await service.getDataResetState(db);
   assert.equal(state.pending, null);
