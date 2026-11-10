@@ -22,19 +22,19 @@ function validDate(value) {
   return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
 }
 
-function notify(db, userId, title, message, relatedType, relatedId) {
-  db.prepare(`INSERT INTO notifications(user_id,title,message,related_type,related_id) VALUES(?,?,?,?,?)`)
+async function notify(db, userId, title, message, relatedType, relatedId) {
+  await db.prepare(`INSERT INTO notifications(user_id,title,message,related_type,related_id) VALUES(?,?,?,?,?)`)
     .run(userId, title, message, relatedType, relatedId);
 }
 
-function tallyVotes(db, expenseId) {
-  return db.prepare(`SELECT
+async function tallyVotes(db, expenseId) {
+  return await db.prepare(`SELECT
       SUM(CASE WHEN vote='approved' THEN 1 ELSE 0 END) AS approvals,
       SUM(CASE WHEN vote='rejected' THEN 1 ELSE 0 END) AS rejections
     FROM expense_votes WHERE expense_id=?`).get(expenseId);
 }
 
-function createExpense(db, actorId, body) {
+async function createExpense(db, actorId, body) {
   const title = String(body.title || '').trim();
   const category = String(body.category || '');
   const type = String(body.expenseType || '');
@@ -45,7 +45,7 @@ function createExpense(db, actorId, body) {
   if (!validDate(date)) fail('Choose a valid expense date.');
   if (!CATEGORIES.includes(category)) fail('Choose a valid expense category.');
   if (!TYPES.includes(type)) fail('Choose shared or personal expense.');
-  const allUsers = db.prepare('SELECT id FROM users ORDER BY id').all().map(row => row.id);
+  const allUsers = (await db.prepare('SELECT id FROM users ORDER BY id').all()).map(row => row.id);
   if (allUsers.length !== 5 || !allUsers.includes(actorId)) fail('BalanceIT must be configured with exactly five members.', 500);
   let participants = [];
   if (type === 'shared') {
@@ -54,71 +54,70 @@ function createExpense(db, actorId, body) {
     if (new Set(requested).size !== requested.length) fail('A participant can only be selected once.');
     participants = allocateShares(amountPaise, requested);
   }
-  const insert = db.transaction(() => {
-    const result = db.prepare(`INSERT INTO expenses(title,amount_paise,category,expense_date,expense_type,paid_by,status)
+  const insert = db.transaction(async () => {
+    const result = await db.prepare(`INSERT INTO expenses(title,amount_paise,category,expense_date,expense_type,paid_by,status)
       VALUES(?,?,?,?,?,?,'pending')`).run(title, amountPaise, category, date, type, actorId);
     const expenseId = Number(result.lastInsertRowid);
-    const addParticipant = db.prepare('INSERT INTO expense_participants(expense_id,user_id,share_paise) VALUES(?,?,?)');
-    for (const participant of participants) addParticipant.run(expenseId, participant.userId, participant.sharePaise);
-    const name = db.prepare('SELECT display_name FROM users WHERE id=?').get(actorId).display_name;
+    for (const participant of participants) await db.prepare('INSERT INTO expense_participants(expense_id,user_id,share_paise) VALUES(?,?,?)').run(expenseId, participant.userId, participant.sharePaise);
+    const name = (await db.prepare('SELECT display_name FROM users WHERE id=?').get(actorId)).display_name;
     for (const userId of allUsers.filter(id => id !== actorId)) {
-      notify(db, userId, 'Expense needs your review', `${name} submitted “${title}” for approval.`, 'expense', expenseId);
+      await notify(db, userId, 'Expense needs your review', `${name} submitted “${title}” for approval.`, 'expense', expenseId);
     }
     return expenseId;
   });
-  return insert();
+  return await insert();
 }
 
-function voteOnExpense(db, actorId, expenseId, vote, reason = '') {
+async function voteOnExpense(db, actorId, expenseId, vote, reason = '') {
   if (!['approved', 'rejected'].includes(vote)) fail('Choose approve or reject.');
-  const expense = db.prepare('SELECT * FROM expenses WHERE id=?').get(expenseId);
+  const expense = await db.prepare('SELECT * FROM expenses WHERE id=?').get(expenseId);
   if (!expense) fail('Expense not found.', 404);
   if (expense.paid_by === actorId) fail('You cannot vote on an expense you submitted.', 403);
   if (expense.status !== 'pending') fail('This expense is no longer awaiting approval.', 409);
-  const userCount = db.prepare('SELECT COUNT(*) AS count FROM users').get().count;
+  const userCount = (await db.prepare('SELECT COUNT(*) AS count FROM users').get()).count;
   if (userCount !== 5) fail('BalanceIT must be configured with exactly five members.', 500);
   const cleanReason = vote === 'rejected' ? String(reason || '').trim().slice(0, 250) : null;
-  const apply = db.transaction(() => {
+  const apply = db.transaction(async () => {
     try {
-      db.prepare('INSERT INTO expense_votes(expense_id,user_id,vote,rejection_reason) VALUES(?,?,?,?)')
+      await db.prepare('INSERT INTO expense_votes(expense_id,user_id,vote,rejection_reason) VALUES(?,?,?,?)')
         .run(expenseId, actorId, vote, cleanReason);
     } catch (error) {
-      if (/UNIQUE constraint failed: expense_votes\.expense_id, expense_votes\.user_id/i.test(error.message || '')) fail('You have already voted on this expense.', 409);
+      if (/UNIQUE constraint failed: expense_votes\.expense_id, expense_votes\.user_id/i.test(error.message || '') || (error.code === '23505' && error.constraint === 'expense_votes_expense_id_user_id_key')) fail('You have already voted on this expense.', 409);
       throw error;
     }
-    const tally = tallyVotes(db, expenseId);
+    const tally = await tallyVotes(db, expenseId);
     let status = 'pending';
     let rejectionReason = null;
     if (tally.approvals >= 3) status = 'approved';
     else if (tally.rejections >= 2) {
       status = 'rejected';
-      rejectionReason = db.prepare(`SELECT rejection_reason FROM expense_votes WHERE expense_id=? AND vote='rejected' AND rejection_reason IS NOT NULL AND rejection_reason!='' ORDER BY created_at LIMIT 1`).get(expenseId)?.rejection_reason || null;
+      rejectionReason = (await db.prepare(`SELECT rejection_reason FROM expense_votes WHERE expense_id=? AND vote='rejected' AND rejection_reason IS NOT NULL AND rejection_reason!='' ORDER BY created_at LIMIT 1`).get(expenseId))?.rejection_reason || null;
     }
     if (status !== 'pending') {
-      db.prepare("UPDATE expenses SET status=?, rejection_reason=?, updated_at=datetime('now') WHERE id=? AND status='pending'")
+      await db.prepare("UPDATE expenses SET status=?, rejection_reason=?, updated_at=datetime('now') WHERE id=? AND status='pending'")
         .run(status, rejectionReason, expenseId);
-      const submitter = db.prepare('SELECT paid_by FROM expenses WHERE id=?').get(expenseId).paid_by;
+      const submitter = (await db.prepare('SELECT paid_by FROM expenses WHERE id=?').get(expenseId)).paid_by;
       const title = status === 'approved' ? 'Expense approved' : 'Expense rejected';
       const message = status === 'approved'
         ? `Your expense “${expense.title}” was approved and added to the ledger.`
         : `Your expense “${expense.title}” was rejected${rejectionReason ? `: ${rejectionReason}` : '.'}`;
-      notify(db, submitter, title, message, 'expense', expenseId);
+      await notify(db, submitter, title, message, 'expense', expenseId);
     }
     return { status, approvals: tally.approvals || 0, rejections: tally.rejections || 0 };
   });
-  return apply();
+  return await apply();
 }
 
-function financeSnapshot(db) {
-  const members = db.prepare('SELECT id,username,display_name FROM users ORDER BY id').all();
-  const rows = db.prepare(`SELECT id,amount_paise,expense_type,paid_by,expense_date,title,category,status
+async function financeSnapshot(db) {
+  const members = await db.prepare('SELECT id,username,display_name FROM users ORDER BY id').all();
+  const rows = await db.prepare(`SELECT id,amount_paise,expense_type,paid_by,expense_date,title,category,status
     FROM expenses WHERE status='approved' ORDER BY expense_date DESC,id DESC`).all();
   const balances = new Map(members.map(m => [m.id, {
     id: m.id, username: m.username, name: m.display_name,
     sharedPaidPaise: 0, personalPaidPaise: 0, totalPaidPaise: 0,
     fairSharePaise: 0, netBalancePaise: 0
   }]));
-  const shares = db.prepare(`SELECT ep.user_id,ep.share_paise FROM expense_participants ep
+  const shares = await db.prepare(`SELECT ep.user_id,ep.share_paise FROM expense_participants ep
     JOIN expenses e ON e.id=ep.expense_id WHERE e.status='approved' AND e.expense_type='shared'`).all();
   for (const row of rows) {
     const member = balances.get(row.paid_by);
@@ -131,7 +130,7 @@ function financeSnapshot(db) {
     const member = balances.get(row.user_id);
     if (member) member.fairSharePaise += row.share_paise;
   }
-  const settlements = db.prepare(`SELECT payer_id,receiver_id,
+  const settlements = await db.prepare(`SELECT payer_id,receiver_id,
     COALESCE(confirmed_amount_paise,amount_paise) AS settled_amount_paise
     FROM settlements WHERE status='confirmed'`).all();
   for (const row of settlements) {
@@ -198,13 +197,13 @@ function suggestSettlements(memberBalances) {
   return suggestions;
 }
 
-function getDashboard(db, actorId) {
-  const snapshot = financeSnapshot(db);
+async function getDashboard(db, actorId) {
+  const snapshot = await financeSnapshot(db);
   const month = currentHouseholdMonth();
   const currentMonthPaise = snapshot.rows.filter(row => row.expense_type === 'shared' && row.expense_date.startsWith(month))
     .reduce((sum, row) => sum + row.amount_paise, 0);
-  const pendingApprovals = db.prepare("SELECT COUNT(*) AS count FROM expenses WHERE status='pending'").get().count;
-  const unreadNotifications = db.prepare('SELECT COUNT(*) AS count FROM notifications WHERE user_id=? AND is_read=0').get(actorId);
+  const pendingApprovals = (await db.prepare("SELECT COUNT(*) AS count FROM expenses WHERE status='pending'").get()).count;
+  const unreadNotifications = await db.prepare('SELECT COUNT(*) AS count FROM notifications WHERE user_id=? AND is_read=0').get(actorId);
   return {
     totalApprovedGroupPaise: snapshot.approvedSharedPaise,
     currentMonthPaise,
@@ -212,24 +211,24 @@ function getDashboard(db, actorId) {
     pendingApprovals,
     outstandingSettlementPaise: snapshot.members.filter(m => m.netBalancePaise < 0).reduce((sum, m) => sum - m.netBalancePaise, 0),
     members: snapshot.members,
-    recentExpenses: snapshot.rows.slice(0, 8).map(row => expenseWithPayer(db, row.id)),
+    recentExpenses: await Promise.all(snapshot.rows.slice(0, 8).map(row => expenseWithPayer(db, row.id))),
     settlementSuggestions: suggestSettlements(snapshot.members),
     unreadNotifications: unreadNotifications.count
   };
 }
 
-function expenseWithPayer(db, id) {
-  const expense = db.prepare(`SELECT e.*,u.display_name AS paid_by_name,u.username AS paid_by_username FROM expenses e JOIN users u ON u.id=e.paid_by WHERE e.id=?`).get(id);
+async function expenseWithPayer(db, id) {
+  const expense = await db.prepare(`SELECT e.*,u.display_name AS paid_by_name,u.username AS paid_by_username FROM expenses e JOIN users u ON u.id=e.paid_by WHERE e.id=?`).get(id);
   if (!expense) return null;
-  const tally = tallyVotes(db, id);
+  const tally = await tallyVotes(db, id);
   expense.approvals = tally.approvals || 0;
   expense.rejections = tally.rejections || 0;
-  expense.participants = db.prepare(`SELECT u.id,u.display_name AS name,ep.share_paise FROM expense_participants ep JOIN users u ON u.id=ep.user_id WHERE ep.expense_id=? ORDER BY u.id`).all(id);
-  expense.votes = db.prepare(`SELECT v.user_id,u.display_name AS name,v.vote,v.rejection_reason,v.created_at FROM expense_votes v JOIN users u ON u.id=v.user_id WHERE v.expense_id=? ORDER BY v.created_at`).all(id);
+  expense.participants = await db.prepare(`SELECT u.id,u.display_name AS name,ep.share_paise FROM expense_participants ep JOIN users u ON u.id=ep.user_id WHERE ep.expense_id=? ORDER BY u.id`).all(id);
+  expense.votes = await db.prepare(`SELECT v.user_id,u.display_name AS name,v.vote,v.rejection_reason,v.created_at FROM expense_votes v JOIN users u ON u.id=v.user_id WHERE v.expense_id=? ORDER BY v.created_at`).all(id);
   return expense;
 }
 
-function listExpenses(db, query = {}) {
+async function listExpenses(db, query = {}) {
   const where = ["e.status='approved'"];
   const params = [];
   if (query.month && /^\d{4}-\d{2}$/.test(query.month)) { where.push("substr(e.expense_date,1,7)=?"); params.push(query.month); }
@@ -240,42 +239,42 @@ function listExpenses(db, query = {}) {
   if (query.search) { where.push('(e.title LIKE ? OR u.display_name LIKE ? OR e.category LIKE ?)'); const term = `%${String(query.search).slice(0, 80)}%`; params.push(term, term, term); }
   const page = Math.max(1, Number.parseInt(query.page, 10) || 1);
   const limit = Math.min(100, Math.max(1, Number.parseInt(query.limit, 10) || 20));
-  const total = db.prepare(`SELECT COUNT(*) AS count FROM expenses e JOIN users u ON u.id=e.paid_by WHERE ${where.join(' AND ')}`).get(...params).count;
-  const rows = db.prepare(`SELECT e.*,u.display_name AS paid_by_name FROM expenses e JOIN users u ON u.id=e.paid_by
+  const total = (await db.prepare(`SELECT COUNT(*) AS count FROM expenses e JOIN users u ON u.id=e.paid_by WHERE ${where.join(' AND ')}`).get(...params)).count;
+  const rows = await db.prepare(`SELECT e.*,u.display_name AS paid_by_name FROM expenses e JOIN users u ON u.id=e.paid_by
     WHERE ${where.join(' AND ')} ORDER BY e.expense_date DESC,e.id DESC LIMIT ? OFFSET ?`).all(...params, limit, (page - 1) * limit);
-  const totals = db.prepare(`SELECT
+  const totals = await db.prepare(`SELECT
     COALESCE(SUM(CASE WHEN expense_type='shared' THEN amount_paise ELSE 0 END),0) AS shared_paise,
     COALESCE(SUM(CASE WHEN expense_type='personal' THEN amount_paise ELSE 0 END),0) AS personal_paise,
     COALESCE(SUM(amount_paise),0) AS total_paise FROM expenses e JOIN users u ON u.id=e.paid_by WHERE ${where.join(' AND ')}`)
     .get(...params);
-  const byMember = db.prepare(`SELECT u.id,u.display_name,COALESCE(SUM(e.amount_paise),0) AS amount_paise FROM users u
+  const byMember = await db.prepare(`SELECT u.id,u.display_name,COALESCE(SUM(e.amount_paise),0) AS amount_paise FROM users u
     LEFT JOIN expenses e ON e.paid_by=u.id AND ${where.join(' AND ')} GROUP BY u.id ORDER BY u.id`).all(...params);
   return { rows, total, page, pages: Math.max(1, Math.ceil(total / limit)), totals, byMember };
 }
 
-function getApprovals(db, actorId) {
-  const pending = db.prepare(`SELECT e.id,e.title,e.amount_paise,e.category,e.expense_date,e.expense_type,e.paid_by,e.status,
+async function getApprovals(db, actorId) {
+  const pending = await db.prepare(`SELECT e.id,e.title,e.amount_paise,e.category,e.expense_date,e.expense_type,e.paid_by,e.status,
     u.display_name AS paid_by_name,
     SUM(CASE WHEN v.vote='approved' THEN 1 ELSE 0 END) AS approvals,
     SUM(CASE WHEN v.vote='rejected' THEN 1 ELSE 0 END) AS rejections,
     MAX(CASE WHEN v.user_id=? THEN v.vote ELSE NULL END) AS my_vote
     FROM expenses e JOIN users u ON u.id=e.paid_by LEFT JOIN expense_votes v ON v.expense_id=e.id
     WHERE e.status='pending' GROUP BY e.id ORDER BY e.created_at DESC`).all(actorId);
-  const history = db.prepare(`SELECT e.id,e.title,e.amount_paise,e.category,e.expense_date,e.expense_type,e.status,e.rejection_reason,u.display_name AS paid_by_name,
+  const history = await db.prepare(`SELECT e.id,e.title,e.amount_paise,e.category,e.expense_date,e.expense_type,e.status,e.rejection_reason,u.display_name AS paid_by_name,
     (SELECT SUM(vote='approved') FROM expense_votes WHERE expense_id=e.id) AS approvals,
     (SELECT SUM(vote='rejected') FROM expense_votes WHERE expense_id=e.id) AS rejections
     FROM expenses e JOIN users u ON u.id=e.paid_by WHERE e.status!='pending' ORDER BY e.updated_at DESC LIMIT 20`).all();
   return { pending, history };
 }
 
-function getSettlements(db) {
-  const snapshot = financeSnapshot(db);
-  const history = db.prepare(`SELECT s.*,p.display_name AS payer_name,r.display_name AS receiver_name FROM settlements s
+async function getSettlements(db) {
+  const snapshot = await financeSnapshot(db);
+  const history = await db.prepare(`SELECT s.*,p.display_name AS payer_name,r.display_name AS receiver_name FROM settlements s
     JOIN users p ON p.id=s.payer_id JOIN users r ON r.id=s.receiver_id ORDER BY s.created_at DESC LIMIT 100`).all();
   return { members: snapshot.members, suggestions: suggestSettlements(snapshot.members), history };
 }
 
-function createSettlement(db, actorId, body) {
+async function createSettlement(db, actorId, body) {
   const receiverId = Number(body.receiverId);
   const amountPaise = Number(body.amountPaise);
   const paymentDate = String(body.paymentDate || '');
@@ -283,26 +282,26 @@ function createSettlement(db, actorId, body) {
   if (!Number.isSafeInteger(amountPaise) || amountPaise <= 0) fail('Enter a valid positive payment amount.');
   if (!validDate(paymentDate)) fail('Choose a valid payment date.');
   if (receiverId === actorId) fail('You cannot record a payment to yourself.');
-  const dbReceiver = db.prepare('SELECT id FROM users WHERE id=?').get(receiverId);
+  const dbReceiver = await db.prepare('SELECT id FROM users WHERE id=?').get(receiverId);
   if (!dbReceiver) fail('Choose a valid recipient.');
-  const snapshot = financeSnapshot(db);
+  const snapshot = await financeSnapshot(db);
   const payer = snapshot.members.find(m => m.id === actorId);
   const receiver = snapshot.members.find(m => m.id === receiverId);
   if (!payer || !receiver || payer.netBalancePaise >= 0 || receiver.netBalancePaise <= 0) fail('This member pair has no outstanding settlement to record.', 409);
   if (amountPaise > Math.min(-payer.netBalancePaise, receiver.netBalancePaise)) fail('Payment exceeds the current outstanding amount between these balances.', 409);
-  const pending = db.prepare(`SELECT id FROM settlements WHERE payer_id=? AND receiver_id=? AND status='pending_confirmation'`).get(actorId, receiverId);
+  const pending = await db.prepare(`SELECT id FROM settlements WHERE payer_id=? AND receiver_id=? AND status='pending_confirmation'`).get(actorId, receiverId);
   if (pending) fail('A payment request for this member is already waiting for confirmation.', 409);
-  const tx = db.transaction(() => {
-    const result = db.prepare(`INSERT INTO settlements(payer_id,receiver_id,amount_paise,payment_date,note,status) VALUES(?,?,?,?,?,'pending_confirmation')`)
+  const tx = db.transaction(async () => {
+    const result = await db.prepare(`INSERT INTO settlements(payer_id,receiver_id,amount_paise,payment_date,note,status) VALUES(?,?,?,?,?,'pending_confirmation')`)
       .run(actorId, receiverId, amountPaise, paymentDate, note);
-    const payerName = db.prepare('SELECT display_name FROM users WHERE id=?').get(actorId).display_name;
-    notify(db, receiverId, 'Confirm a settlement', `${payerName} recorded a payment. Confirm it once received.`, 'settlement', Number(result.lastInsertRowid));
+    const payerName = (await db.prepare('SELECT display_name FROM users WHERE id=?').get(actorId)).display_name;
+    await notify(db, receiverId, 'Confirm a settlement', `${payerName} recorded a payment. Confirm it once received.`, 'settlement', Number(result.lastInsertRowid));
     return Number(result.lastInsertRowid);
   });
-  return tx();
+  return await tx();
 }
 
-function recordReceivedSettlement(db, actorId, body) {
+async function recordReceivedSettlement(db, actorId, body) {
   const payerId = Number(body.payerId);
   const amountPaise = Number(body.amountPaise);
   const paymentDate = String(body.paymentDate || '');
@@ -310,30 +309,30 @@ function recordReceivedSettlement(db, actorId, body) {
   if (!Number.isSafeInteger(amountPaise) || amountPaise <= 0) fail('Enter a valid positive amount received.');
   if (!validDate(paymentDate)) fail('Choose a valid payment date.');
   if (payerId === actorId) fail('A payment must come from another member.');
-  const snapshot = financeSnapshot(db);
+  const snapshot = await financeSnapshot(db);
   const payer = snapshot.members.find(member => member.id === payerId);
   const receiver = snapshot.members.find(member => member.id === actorId);
   if (!payer || !receiver || payer.netBalancePaise >= 0 || receiver.netBalancePaise <= 0) fail('This member pair has no outstanding amount to receive.', 409);
   if (amountPaise > Math.min(-payer.netBalancePaise, receiver.netBalancePaise)) fail('Received amount exceeds the current outstanding balance.', 409);
-  const pending = db.prepare(`SELECT id FROM settlements WHERE payer_id=? AND receiver_id=? AND status='pending_confirmation'`).get(payerId, actorId);
+  const pending = await db.prepare(`SELECT id FROM settlements WHERE payer_id=? AND receiver_id=? AND status='pending_confirmation'`).get(payerId, actorId);
   if (pending) fail('There is already a payment request from this member. Use its Received action to confirm the amount.', 409);
 
-  const tx = db.transaction(() => {
-    const result = db.prepare(`INSERT INTO settlements(payer_id,receiver_id,amount_paise,confirmed_amount_paise,payment_date,note,status,confirmed_at)
+  const tx = db.transaction(async () => {
+    const result = await db.prepare(`INSERT INTO settlements(payer_id,receiver_id,amount_paise,confirmed_amount_paise,payment_date,note,status,confirmed_at)
       VALUES(?,?,?,?,?,?,'confirmed',datetime('now'))`).run(payerId, actorId, amountPaise, amountPaise, paymentDate, note);
-    const receiverName = db.prepare('SELECT display_name FROM users WHERE id=?').get(actorId).display_name;
-    const payerName = db.prepare('SELECT display_name FROM users WHERE id=?').get(payerId).display_name;
+    const receiverName = (await db.prepare('SELECT display_name FROM users WHERE id=?').get(actorId)).display_name;
+    const payerName = (await db.prepare('SELECT display_name FROM users WHERE id=?').get(payerId)).display_name;
     const settlementId = Number(result.lastInsertRowid);
-    notify(db, payerId, 'Payment marked received', `${receiverName} marked your payment as received.`, 'settlement', settlementId);
-    notify(db, actorId, 'Payment received', `Received a payment from ${payerName}.`, 'settlement', settlementId);
+    await notify(db, payerId, 'Payment marked received', `${receiverName} marked your payment as received.`, 'settlement', settlementId);
+    await notify(db, actorId, 'Payment received', `Received a payment from ${payerName}.`, 'settlement', settlementId);
     return settlementId;
   });
-  return tx();
+  return await tx();
 }
 
-function confirmSettlement(db, actorId, settlementId, confirmedAmountPaise) {
-  const tx = db.transaction(() => {
-    const settlement = db.prepare('SELECT * FROM settlements WHERE id=?').get(settlementId);
+async function confirmSettlement(db, actorId, settlementId, confirmedAmountPaise) {
+  const tx = db.transaction(async () => {
+    const settlement = await db.prepare('SELECT * FROM settlements WHERE id=?').get(settlementId);
     if (!settlement) fail('Settlement not found.', 404);
     if (settlement.receiver_id !== actorId) fail('Only the receiver can confirm this payment.', 403);
     if (settlement.status !== 'pending_confirmation') fail('This settlement has already been confirmed.', 409);
@@ -341,39 +340,39 @@ function confirmSettlement(db, actorId, settlementId, confirmedAmountPaise) {
     if (!Number.isSafeInteger(actualPaise) || actualPaise <= 0 || actualPaise > settlement.amount_paise) {
       fail('Confirmed amount must be positive and no more than the requested amount.');
     }
-    const snapshot = financeSnapshot(db);
+    const snapshot = await financeSnapshot(db);
     const payer = snapshot.members.find(m => m.id === settlement.payer_id);
     const receiver = snapshot.members.find(m => m.id === settlement.receiver_id);
     if (!payer || !receiver || payer.netBalancePaise >= 0 || receiver.netBalancePaise <= 0 || actualPaise > Math.min(-payer.netBalancePaise, receiver.netBalancePaise)) {
       fail('The outstanding balances changed; this payment can no longer be confirmed as recorded.', 409);
     }
-    db.prepare("UPDATE settlements SET status='confirmed',confirmed_amount_paise=?,confirmed_at=datetime('now') WHERE id=? AND status='pending_confirmation'").run(actualPaise, settlementId);
-    const receiverName = db.prepare('SELECT display_name FROM users WHERE id=?').get(actorId).display_name;
-    notify(db, settlement.payer_id, 'Settlement confirmed', `${receiverName} confirmed ${actualPaise < settlement.amount_paise ? 'a partial payment' : 'your payment'}.`, 'settlement', settlementId);
-    notify(db, actorId, 'Settlement confirmed', 'The confirmed amount is now included in the balances.', 'settlement', settlementId);
+    await db.prepare("UPDATE settlements SET status='confirmed',confirmed_amount_paise=?,confirmed_at=datetime('now') WHERE id=? AND status='pending_confirmation'").run(actualPaise, settlementId);
+    const receiverName = (await db.prepare('SELECT display_name FROM users WHERE id=?').get(actorId)).display_name;
+    await notify(db, settlement.payer_id, 'Settlement confirmed', `${receiverName} confirmed ${actualPaise < settlement.amount_paise ? 'a partial payment' : 'your payment'}.`, 'settlement', settlementId);
+    await notify(db, actorId, 'Settlement confirmed', 'The confirmed amount is now included in the balances.', 'settlement', settlementId);
     return { confirmedAmountPaise: actualPaise };
   });
-  return tx();
+  return await tx();
 }
 
-function getReport(db, year, month) {
+async function getReport(db, year, month) {
   if (!/^\d{4}$/.test(String(year)) || !/^(0[1-9]|1[0-2])$/.test(String(month))) fail('Choose a valid report month.');
   const key = `${year}-${month}`;
-  const expenses = db.prepare(`SELECT e.*,u.display_name AS paid_by_name FROM expenses e JOIN users u ON u.id=e.paid_by
+  const expenses = await db.prepare(`SELECT e.*,u.display_name AS paid_by_name FROM expenses e JOIN users u ON u.id=e.paid_by
     WHERE e.status='approved' AND substr(e.expense_date,1,7)=? ORDER BY e.expense_date,e.id`).all(key);
-  const members = db.prepare('SELECT id,display_name FROM users ORDER BY id').all();
+  const members = await db.prepare('SELECT id,display_name FROM users ORDER BY id').all();
   const paid = new Map(members.map(m => [m.id, { id: m.id, name: m.display_name, totalPaidPaise: 0, sharedPaidPaise: 0, personalPaidPaise: 0, fairSharePaise: 0 }]));
   for (const expense of expenses) {
     const m = paid.get(expense.paid_by);
     m.totalPaidPaise += expense.amount_paise;
     m[expense.expense_type === 'shared' ? 'sharedPaidPaise' : 'personalPaidPaise'] += expense.amount_paise;
   }
-  const shares = db.prepare(`SELECT ep.user_id,ep.share_paise FROM expense_participants ep JOIN expenses e ON e.id=ep.expense_id
+  const shares = await db.prepare(`SELECT ep.user_id,ep.share_paise FROM expense_participants ep JOIN expenses e ON e.id=ep.expense_id
     WHERE e.status='approved' AND e.expense_type='shared' AND substr(e.expense_date,1,7)=?`).all(key);
   for (const share of shares) if (paid.has(share.user_id)) paid.get(share.user_id).fairSharePaise += share.share_paise;
-  const categories = db.prepare(`SELECT e.category,SUM(e.amount_paise) AS amount_paise FROM expenses e WHERE e.status='approved' AND substr(e.expense_date,1,7)=? GROUP BY e.category ORDER BY amount_paise DESC`).all(key);
-  const allBalances = financeSnapshot(db).members;
-  const settlementHistory = db.prepare(`SELECT s.*,p.display_name AS payer_name,r.display_name AS receiver_name FROM settlements s JOIN users p ON p.id=s.payer_id JOIN users r ON r.id=s.receiver_id
+  const categories = await db.prepare(`SELECT e.category,SUM(e.amount_paise) AS amount_paise FROM expenses e WHERE e.status='approved' AND substr(e.expense_date,1,7)=? GROUP BY e.category ORDER BY amount_paise DESC`).all(key);
+  const allBalances = (await financeSnapshot(db)).members;
+  const settlementHistory = await db.prepare(`SELECT s.*,p.display_name AS payer_name,r.display_name AS receiver_name FROM settlements s JOIN users p ON p.id=s.payer_id JOIN users r ON r.id=s.receiver_id
     WHERE substr(s.payment_date,1,7)=? ORDER BY s.payment_date`).all(key);
   return {
     month: key, expenses, members: [...paid.values()].map(m => ({ ...m, netBalancePaise: allBalances.find(b => b.id === m.id)?.netBalancePaise || 0 })),
@@ -385,23 +384,23 @@ function getReport(db, year, month) {
   };
 }
 
-function buildDataResetArchive(db) {
-  const members = db.prepare('SELECT id,username,display_name FROM users ORDER BY id').all();
-  const expenses = db.prepare(`SELECT e.*,u.display_name AS paid_by_name FROM expenses e
+async function buildDataResetArchive(db) {
+  const members = await db.prepare('SELECT id,username,display_name FROM users ORDER BY id').all();
+  const expenses = await db.prepare(`SELECT e.*,u.display_name AS paid_by_name FROM expenses e
     JOIN users u ON u.id=e.paid_by ORDER BY e.id`).all();
   for (const expense of expenses) {
-    expense.participants = db.prepare(`SELECT ep.user_id,u.display_name,ep.share_paise FROM expense_participants ep
+    expense.participants = await db.prepare(`SELECT ep.user_id,u.display_name,ep.share_paise FROM expense_participants ep
       JOIN users u ON u.id=ep.user_id WHERE ep.expense_id=? ORDER BY ep.user_id`).all(expense.id);
-    expense.votes = db.prepare(`SELECT v.user_id,u.display_name,v.vote,v.rejection_reason,v.created_at FROM expense_votes v
+    expense.votes = await db.prepare(`SELECT v.user_id,u.display_name,v.vote,v.rejection_reason,v.created_at FROM expense_votes v
       JOIN users u ON u.id=v.user_id WHERE v.expense_id=? ORDER BY v.created_at,v.id`).all(expense.id);
   }
-  const settlements = db.prepare(`SELECT s.*,p.display_name AS payer_name,r.display_name AS receiver_name
+  const settlements = await db.prepare(`SELECT s.*,p.display_name AS payer_name,r.display_name AS receiver_name
     FROM settlements s JOIN users p ON p.id=s.payer_id JOIN users r ON r.id=s.receiver_id ORDER BY s.id`).all();
   return { members, expenses, settlements };
 }
 
-function getDataResetState(db) {
-  const requests = db.prepare(`SELECT r.id,r.requested_by,r.status,r.created_at,r.completed_at,
+async function getDataResetState(db) {
+  const requests = await db.prepare(`SELECT r.id,r.requested_by,r.status,r.created_at,r.completed_at,
       u.display_name AS requested_by_name,
       (SELECT COUNT(*) FROM data_reset_votes v WHERE v.request_id=r.id AND v.vote='approved') AS approvals,
       (SELECT COUNT(*) FROM data_reset_votes v WHERE v.request_id=r.id AND v.vote='rejected') AS rejections,
@@ -410,7 +409,7 @@ function getDataResetState(db) {
     LEFT JOIN data_reset_archives a ON a.request_id=r.id
     ORDER BY r.created_at DESC,r.id DESC LIMIT 30`).all();
   for (const request of requests) {
-    request.votes = db.prepare(`SELECT v.user_id,u.display_name,v.vote,v.created_at FROM data_reset_votes v
+    request.votes = await db.prepare(`SELECT v.user_id,u.display_name,v.vote,v.created_at FROM data_reset_votes v
       JOIN users u ON u.id=v.user_id WHERE v.request_id=? ORDER BY v.created_at,v.id`).all(request.id);
   }
   const pendingRequest = requests.find(request => request.status === 'pending') || null;
@@ -420,79 +419,79 @@ function getDataResetState(db) {
   };
 }
 
-function createDataResetRequest(db, actorId) {
-  const tx = db.transaction(() => {
-    const existing = db.prepare("SELECT id FROM data_reset_requests WHERE status='pending'").get();
+async function createDataResetRequest(db, actorId) {
+  const tx = db.transaction(async () => {
+    const existing = await db.prepare("SELECT id FROM data_reset_requests WHERE status='pending'").get();
     if (existing) fail('A household data reset request is already awaiting votes.', 409);
-    const requester = db.prepare('SELECT id,display_name FROM users WHERE id=?').get(actorId);
+    const requester = await db.prepare('SELECT id,display_name FROM users WHERE id=?').get(actorId);
     if (!requester) fail('Your member account could not be found.', 401);
-    const result = db.prepare("INSERT INTO data_reset_requests(requested_by,status) VALUES(?,'pending')").run(actorId);
+    const result = await db.prepare("INSERT INTO data_reset_requests(requested_by,status) VALUES(?,'pending')").run(actorId);
     const requestId = Number(result.lastInsertRowid);
-    db.prepare("INSERT INTO data_reset_votes(request_id,user_id,vote) VALUES(?,?,'approved')").run(requestId, actorId);
-    const recipients = db.prepare('SELECT id FROM users WHERE id!=?').all(actorId);
+    await db.prepare("INSERT INTO data_reset_votes(request_id,user_id,vote) VALUES(?,?,'approved')").run(requestId, actorId);
+    const recipients = await db.prepare('SELECT id FROM users WHERE id!=?').all(actorId);
     for (const recipient of recipients) {
-      notify(db, recipient.id, 'Household reset vote requested', `${requester.display_name} requested a full ledger reset. Review it on the Reports page.`, 'data_reset', requestId);
+      await notify(db, recipient.id, 'Household reset vote requested', `${requester.display_name} requested a full ledger reset. Review it on the Reports page.`, 'data_reset', requestId);
     }
     return requestId;
   });
-  return tx();
+  return await tx();
 }
 
-function voteOnDataReset(db, actorId, requestId, vote) {
+async function voteOnDataReset(db, actorId, requestId, vote) {
   if (!['approved', 'rejected'].includes(vote)) fail('Choose approve or reject for this reset request.');
-  const tx = db.transaction(() => {
-    const request = db.prepare('SELECT * FROM data_reset_requests WHERE id=?').get(requestId);
+  const tx = db.transaction(async () => {
+    const request = await db.prepare('SELECT * FROM data_reset_requests WHERE id=?').get(requestId);
     if (!request) fail('Reset request not found.', 404);
     if (request.status !== 'pending') fail('This reset request is no longer awaiting votes.', 409);
     if (request.requested_by === actorId) fail('Your approval was already counted when you requested the reset.', 409);
-    const existingVote = db.prepare('SELECT vote FROM data_reset_votes WHERE request_id=? AND user_id=?').get(requestId, actorId);
+    const existingVote = await db.prepare('SELECT vote FROM data_reset_votes WHERE request_id=? AND user_id=?').get(requestId, actorId);
     if (existingVote) fail('You have already voted on this reset request.', 409);
-    if (!db.prepare('SELECT id FROM users WHERE id=?').get(actorId)) fail('Your member account could not be found.', 401);
+    if (!await db.prepare('SELECT id FROM users WHERE id=?').get(actorId)) fail('Your member account could not be found.', 401);
 
-    db.prepare('INSERT INTO data_reset_votes(request_id,user_id,vote) VALUES(?,?,?)').run(requestId, actorId, vote);
-    const counts = db.prepare(`SELECT SUM(vote='approved') AS approvals,SUM(vote='rejected') AS rejections
+    await db.prepare('INSERT INTO data_reset_votes(request_id,user_id,vote) VALUES(?,?,?)').run(requestId, actorId, vote);
+    const counts = await db.prepare(`SELECT SUM(vote='approved') AS approvals,SUM(vote='rejected') AS rejections
       FROM data_reset_votes WHERE request_id=?`).get(requestId);
     const approvals = counts.approvals || 0;
     const rejections = counts.rejections || 0;
-    const voter = db.prepare('SELECT display_name FROM users WHERE id=?').get(actorId);
+    const voter = await db.prepare('SELECT display_name FROM users WHERE id=?').get(actorId);
 
     if (approvals >= 4) {
-      const archive = buildDataResetArchive(db);
-      const archived = db.prepare(`INSERT INTO data_reset_archives(request_id,archived_by,expense_count,settlement_count,archive_json)
+      const archive = await buildDataResetArchive(db);
+      const archived = await db.prepare(`INSERT INTO data_reset_archives(request_id,archived_by,expense_count,settlement_count,archive_json)
         VALUES(?,?,?,?,?)`).run(requestId, request.requested_by, archive.expenses.length, archive.settlements.length, JSON.stringify(archive));
       const archiveId = Number(archived.lastInsertRowid);
-      db.prepare("UPDATE data_reset_requests SET status='completed',completed_at=datetime('now') WHERE id=?").run(requestId);
+      await db.prepare("UPDATE data_reset_requests SET status='completed',completed_at=datetime('now') WHERE id=?").run(requestId);
 
       // Keep member accounts and the reset audit/archive tables; clear only the active ledger and old notifications.
-      db.prepare('DELETE FROM expense_votes').run();
-      db.prepare('DELETE FROM expense_participants').run();
-      db.prepare('DELETE FROM expenses').run();
-      db.prepare('DELETE FROM settlements').run();
-      db.prepare('DELETE FROM notifications').run();
-      const members = db.prepare('SELECT id FROM users').all();
+      await db.prepare('DELETE FROM expense_votes').run();
+      await db.prepare('DELETE FROM expense_participants').run();
+      await db.prepare('DELETE FROM expenses').run();
+      await db.prepare('DELETE FROM settlements').run();
+      await db.prepare('DELETE FROM notifications').run();
+      const members = await db.prepare('SELECT id FROM users').all();
       for (const member of members) {
-        notify(db, member.id, 'Ledger reset completed', `The household approved a reset. ${archive.expenses.length} expense records and ${archive.settlements.length} settlement records were archived.`, 'data_reset', requestId);
+        await notify(db, member.id, 'Ledger reset completed', `The household approved a reset. ${archive.expenses.length} expense records and ${archive.settlements.length} settlement records were archived.`, 'data_reset', requestId);
       }
       return { status: 'completed', approvals, rejections, archiveId, message: 'Reset approved. The live ledger is cleared and its previous history is preserved in Reports.' };
     }
 
     if (rejections >= 2) {
-      db.prepare("UPDATE data_reset_requests SET status='rejected',completed_at=datetime('now') WHERE id=?").run(requestId);
-      const members = db.prepare('SELECT id FROM users').all();
+      await db.prepare("UPDATE data_reset_requests SET status='rejected',completed_at=datetime('now') WHERE id=?").run(requestId);
+      const members = await db.prepare('SELECT id FROM users').all();
       for (const member of members) {
-        notify(db, member.id, 'Reset request declined', 'The reset request received two rejections and was closed. No ledger data was changed.', 'data_reset', requestId);
+        await notify(db, member.id, 'Reset request declined', 'The reset request received two rejections and was closed. No ledger data was changed.', 'data_reset', requestId);
       }
       return { status: 'rejected', approvals, rejections, message: 'Reset request declined. No ledger data was changed.' };
     }
 
-    notify(db, request.requested_by, 'Reset vote recorded', `${voter.display_name} ${vote} the household reset request.`, 'data_reset', requestId);
+    await notify(db, request.requested_by, 'Reset vote recorded', `${voter.display_name} ${vote} the household reset request.`, 'data_reset', requestId);
     return { status: 'pending', approvals, rejections, message: 'Your vote has been recorded.' };
   });
-  return tx();
+  return await tx();
 }
 
-function getDataResetArchive(db, archiveId) {
-  const row = db.prepare(`SELECT a.*,r.requested_by,u.display_name AS requested_by_name
+async function getDataResetArchive(db, archiveId) {
+  const row = await db.prepare(`SELECT a.*,r.requested_by,u.display_name AS requested_by_name
     FROM data_reset_archives a JOIN data_reset_requests r ON r.id=a.request_id
     JOIN users u ON u.id=r.requested_by WHERE a.id=?`).get(archiveId);
   if (!row) fail('Preserved history archive not found.', 404);

@@ -2,6 +2,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const nodeEnv = process.env.NODE_ENV || 'development';
+const databaseUrl = process.env.DATABASE_URL || '';
 const legacyDatabasePath = path.resolve('./data/roomledger.sqlite');
 const newDatabasePath = path.resolve('./data/balanceit.sqlite');
 // Reuse the existing ledger after a branding-only rename when DATABASE_PATH is unset.
@@ -22,6 +23,7 @@ module.exports = {
   port: Number(process.env.PORT || 3000),
   nodeEnv,
   sessionSecret: process.env.SESSION_SECRET || (nodeEnv === 'production' ? '' : crypto.randomBytes(32).toString('hex')),
+  databaseUrl,
   databasePath,
   members
 };

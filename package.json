@@ -9,15 +9,19 @@
     "dev": "node --watch src/server.js",
     "seed": "node src/seed.js",
     "reset-credentials": "node src/seed.js --reset-credentials",
+    "import-sqlite": "node src/import-sqlite-to-postgres.js",
     "test": "node --test"
   },
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=22.13"
+  },
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.0",
     "express-session": "^1.18.1",
-    "helmet": "^8.0.0"
+    "helmet": "^8.0.0",
+    "pg": "^8.23.1"
   }
 }

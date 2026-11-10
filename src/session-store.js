@@ -1,6 +1,6 @@
 const session = require('express-session');
 
-class SQLiteSessionStore extends session.Store {
+class DatabaseSessionStore extends session.Store {
   constructor(db) {
     super();
     this.db = db;
@@ -11,32 +11,26 @@ class SQLiteSessionStore extends session.Store {
     this.touchStatement = db.prepare('UPDATE sessions SET expired=? WHERE sid=?');
   }
   get(sid, callback) {
-    try {
-      const row = this.readStatement.get(sid);
+    Promise.resolve().then(() => this.readStatement.get(sid)).then(async row => {
       if (!row) return callback(null, null);
-      if (row.expired <= Date.now()) { this.deleteStatement.run(sid); return callback(null, null); }
+      if (row.expired <= Date.now()) { await this.deleteStatement.run(sid); return callback(null, null); }
       callback(null, JSON.parse(row.sess));
-    } catch (error) { callback(error); }
+    }).catch(callback);
   }
   set(sid, sess, callback = () => {}) {
-    try {
-      const expires = sess.cookie?.expires ? new Date(sess.cookie.expires).getTime() : Date.now() + 7 * 24 * 60 * 60 * 1000;
-      this.upsertStatement.run(sid, JSON.stringify(sess), expires);
-      this.db.prepare('DELETE FROM sessions WHERE expired<=?').run(Date.now());
-      callback(null);
-    } catch (error) { callback(error); }
+    const expires = sess.cookie?.expires ? new Date(sess.cookie.expires).getTime() : Date.now() + 7 * 24 * 60 * 60 * 1000;
+    Promise.resolve().then(async () => {
+      await this.upsertStatement.run(sid, JSON.stringify(sess), expires);
+      await this.db.prepare('DELETE FROM sessions WHERE expired<=?').run(Date.now());
+    }).then(() => callback(null), callback);
   }
   touch(sid, sess, callback = () => {}) {
-    try {
-      const expires = sess.cookie?.expires ? new Date(sess.cookie.expires).getTime() : Date.now() + 7 * 24 * 60 * 60 * 1000;
-      this.touchStatement.run(expires, sid);
-      callback(null);
-    } catch (error) { callback(error); }
+    const expires = sess.cookie?.expires ? new Date(sess.cookie.expires).getTime() : Date.now() + 7 * 24 * 60 * 60 * 1000;
+    Promise.resolve(this.touchStatement.run(expires, sid)).then(() => callback(null), callback);
   }
   destroy(sid, callback = () => {}) {
-    try { this.deleteStatement.run(sid); callback(null); }
-    catch (error) { callback(error); }
+    Promise.resolve(this.deleteStatement.run(sid)).then(() => callback(null), callback);
   }
 }
 
-module.exports = { SQLiteSessionStore };
+module.exports = { DatabaseSessionStore };

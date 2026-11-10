@@ -1,16 +1,16 @@
 # BalanceIT – PG Expense Manager
 
-BalanceIT is a private, responsive expense and settlement app for one household of exactly five roommates. It uses a vanilla JavaScript frontend, Express, SQLite, bcrypt password hashes, and HTTP-only server sessions. There is no public signup route.
+BalanceIT is a private, responsive expense and settlement app for one household of exactly five roommates. It uses a vanilla JavaScript frontend, Express, SQLite for local development or PostgreSQL for hosted deployments, bcrypt password hashes, and HTTP-only server sessions. There is no public signup route.
 
 ## Requirements
 
-- Node.js 22.13 or newer and npm (BalanceIT uses Node's built-in synchronous SQLite driver)
-- A persistent writable disk for the SQLite database in production
+- Node.js 22.13 or newer and npm
+- SQLite is used by default for local development. Set `DATABASE_URL` to use hosted PostgreSQL.
 
 ## Run locally
 
 1. Copy `.env.example` to `.env`.
-2. Set a unique password of at least 10 characters for each of the five members. Keep `.env` private; it is ignored by Git.
+2. Set a unique password of at least 10 characters for each of the five members. Keep `.env` private; it is ignored by Git. Leave `DATABASE_URL` empty for a local SQLite database.
 3. Install dependencies with `npm install`.
 4. Initialize the database and five accounts with `npm run seed` (or start directly; the server initializes an empty database on first start).
 5. Start the app with `npm start` and open `http://localhost:3000`.
@@ -26,16 +26,17 @@ Seed accounts are inserted only when the users table is empty. Restarting the se
 | `PORT` | HTTP port (default `3000`) |
 | `NODE_ENV` | Set to `production` for secure cookies and proxy handling |
 | `SESSION_SECRET` | Long, random session signing secret; use at least 32 characters in production |
-| `DATABASE_PATH` | SQLite file path; new installations default to `./data/balanceit.sqlite` |
+| `DATABASE_URL` | PostgreSQL connection string; when set, the app uses PostgreSQL instead of SQLite |
+| `DATABASE_PATH` | SQLite file path when `DATABASE_URL` is empty; new installations default to `./data/balanceit.sqlite` |
 | `MEMBER_1_USERNAME` … `MEMBER_5_USERNAME` | The only five usernames allowed |
-| `MEMBER_1_PASSWORD` … `MEMBER_5_PASSWORD` | Initial passwords; bcrypt hashes are stored in SQLite |
+| `MEMBER_1_PASSWORD` … `MEMBER_5_PASSWORD` | Initial passwords; bcrypt hashes are stored in the configured database |
 | `MEMBER_1_NAME` … `MEMBER_5_NAME` | Names shown in the app |
 
 For a fresh setup, configure the five usernames and passwords before the first seed. Existing password hashes are not overwritten at startup. To deliberately rotate credentials, update all five member settings in `.env`, stop the app, back up the database, then run `npm run reset-credentials`. This command updates the five accounts in place and keeps their expense history and user IDs. Start the app again afterward. It does not print passwords.
 
 ## Features
 
-- Five configured accounts, login rate limiting, bcrypt hashes, server-side SQLite sessions, HTTP-only SameSite cookies, and no public registration.
+- Five configured accounts, login rate limiting, bcrypt hashes, database-backed server sessions, HTTP-only SameSite cookies, and no public registration.
 - Shared and personal expenses. Shared expenses split equally among selected participants; remainder paise go to the lowest member IDs first.
 - Four independent votes per expense. Three approvals approve, two rejections reject, submitters cannot vote, and a unique database constraint prevents repeat votes.
 - Pending expenses never affect the ledger. Personal expenses are approved and reported but excluded from shared fair shares and balances.
@@ -83,15 +84,31 @@ All API responses and request bodies are JSON except CSV export. Every endpoint 
 | `GET /api/reports?year=YYYY&month=MM` | Monthly spending, member report, categories, and settlement history |
 | `GET /api/reports/export.csv?year=YYYY&month=MM` | Download that report as CSV |
 
-The API validates dates, categories, types, amounts, membership, vote permissions, receiver identity, and current balances on the server. It uses parameterized SQL. Migrations `001_initial.sql`, `002_confirmed_settlement_amount.sql`, and `003_data_reset_approval.sql` create and extend the normalized schema; applied migration versions are recorded in `schema_migrations`.
+The API validates dates, categories, types, amounts, membership, vote permissions, receiver identity, and current balances on the server. It uses parameterized SQL. SQLite migrations are in `migrations/`; equivalent PostgreSQL migrations are in `migrations/postgres/`. Applied migration versions are recorded in `schema_migrations` for either database.
 
 ## Deploy
 
-1. Deploy to a Node.js 22.13+ host that supports a persistent volume. Do not use an ephemeral filesystem for SQLite.
-2. Build/install with `npm ci`, then run `npm start` as the service command. The startup path runs the initial migration and seeds accounts if the database is empty.
-3. Mount a durable volume and set `DATABASE_PATH` to a file on that volume (for example `/var/lib/balanceit/balanceit.sqlite`). Ensure the service user can write to the directory. When no path is configured, BalanceIT reuses an existing `./data/roomledger.sqlite` database if present, preserving data from the previous app name.
-4. Set `NODE_ENV=production`, a randomly generated `SESSION_SECRET` of at least 32 characters, all five unique account usernames, five strong initial passwords, and display names as host secrets/environment variables.
-5. Serve behind HTTPS. Production session cookies are secure, HTTP-only, and SameSite Lax. Configure the host's trusted reverse proxy correctly if it terminates TLS.
-6. Restrict access to environment configuration, back up the SQLite database regularly, and test restoring a backup before relying on it for household records.
+### Free Render + Supabase setup
+
+1. Create a Supabase project on the Free plan. In Supabase, open **Connect**, choose the **Session pooler** connection string, and copy the URI. The session pooler works from hosts that only have IPv4 outbound access.
+2. In Render, open the web service's **Environment** page and add `DATABASE_URL` with that full Supabase URI. Keep it private; do not paste it into source files, commits, screenshots, or chat. If Supabase's URI has a placeholder password, replace it with your database password. If the password has special URL characters, use the URI Supabase provides or URL-encode it.
+3. Set `NODE_ENV=production`, `SESSION_SECRET` to a random value of at least 32 characters, and the five configured usernames, passwords, and display names. Keep using the same member credentials you want the five people to log in with.
+4. Deploy with build command `npm ci` and start command `npm start`. On startup BalanceIT creates the PostgreSQL tables and indexes, then seeds the five users if the database has no users. No SQLite disk or `DATABASE_PATH` is needed in Render when `DATABASE_URL` is set.
+5. Open the Render URL and sign in. The app now stores expenses and sessions in Supabase, so Render's idle spin-down does not erase the ledger.
+
+Supabase Free can pause a project after inactivity and does not include automatic database backups. The project can be restored after pausing, but download your own database exports regularly. Free service limits can change, so check [Supabase Free plan details](https://supabase.com/docs/guides/platform/billing-on-supabase) and [backup guidance](https://supabase.com/docs/guides/platform/backups). Render Free web instances may still sleep while idle, which can make the first request take longer.
+
+### Copy existing local SQLite history
+
+If `data/roomledger.sqlite` contains history you want to keep, copy it before deploying the app to Supabase:
+
+1. Stop the local app. Set `DATABASE_URL` in your local `.env` to the new Supabase Session pooler URI. Leave `DATABASE_PATH` pointing to your local SQLite file.
+2. Import before anyone adds ledger records to Supabase. If the app has already seeded its five accounts, make sure those five usernames match the local SQLite usernames. If Supabase is still empty, set all five `MEMBER_n_USERNAME` and `MEMBER_n_PASSWORD` values locally; passwords must be at least 10 characters.
+3. Run `npm run import-sqlite`. The importer refuses to mix data with existing expenses, settlements, reset history, or notifications. It copies the ledger and audit archives, keeps the five member IDs, and (when it imports the user rows) updates their password hashes from the configured environment variables. It does not copy login sessions, so everyone must sign in again.
+4. Verify the ledger in the app. Keep a backup of the original SQLite file until you have confirmed the migration.
+
+If the deployed Render SQLite database has already been erased and no local database or export contains those records, the data cannot be recovered from this code change. If you do not need to import local history, skip the importer; the app will create a clean ledger and seed the five configured accounts on its first start.
+
+For local development, keep `DATABASE_URL` blank and run BalanceIT with SQLite as described above. On a different host, either use PostgreSQL with `DATABASE_URL` or ensure the SQLite file is on a persistent writable disk. Production session cookies require HTTPS; configure the host's trusted reverse proxy correctly if it terminates TLS.
 
 No credentials or session secrets belong in frontend files or version control. The database includes password hashes and financial records; protect backups and storage accordingly.
