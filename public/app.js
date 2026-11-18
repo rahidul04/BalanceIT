@@ -1,5 +1,5 @@
 const app = document.getElementById('app');
-const categories = ['Groceries', 'Food', 'Electricity', 'Gas', 'Internet', 'Rent', 'Maintenance', 'Other'];
+const categories = ['Groceries', 'Food', 'Gas', 'Rent', 'Maintenance', 'Other'];
 const navItems = [
   ['dashboard', 'Dashboard', '⌂'], ['add-expense', 'Add expense', '＋'], ['expenses', 'Expenses', '▤'],
   ['approvals', 'Approvals', '✓'], ['settlements', 'Settlements', '⇄'], ['reports', 'Reports', '▥']
@@ -75,27 +75,27 @@ function renderLogin(errorMessage = '') {
         <div class="brand"><img class="brand-logo" src="/balanceit-logo.png" alt="BalanceIT logo"><div class="brand-name">Balance<span>IT</span></div></div>
         <div class="login-art-copy">
           <span class="eyebrow">Shared living, made simple</span>
-          <h1>Good house finances start here.</h1>
-          <p>Keep shared expenses clear, approvals transparent, and every settlement fair for everyone in your home.</p>
+          <h1>A Personalized solution for Shared Expenses.</h1>
+          <p>Keep shared expenses clear, approvals transparent, and every settlement fair for us.</p>
           <div class="login-illustration" aria-hidden="true">
             <div class="illus-card"><small style="color:#758078;font-size:9px">Shared expenses</small><div class="illus-big">₹ 12,480</div><div class="illus-line green"></div><div class="illus-line" style="width:45%"></div></div>
             <div class="illus-card"><small style="color:#758078;font-size:9px">This month</small><div class="illus-line green" style="height:9px;width:75%;margin-top:13px"></div><div class="illus-line" style="height:9px;width:52%"></div></div>
             <div class="illus-card"><div class="illus-line green" style="width:80%;margin-top:12px"></div><div class="illus-line" style="width:60%"></div></div>
           </div>
         </div>
-        <small style="position:relative;z-index:1;color:#88958b;font-size:10px">Made for a home that runs together.</small>
+        <small style="position:relative;z-index:1;color:#88958b;font-size:10px">Made for bros who lives in PG.</small>
       </section>
       <section class="login-side">
         <div class="login-box">
           <div class="brand"><span class="brand-mark">B</span><div class="brand-name">Balance<span>IT</span></div></div>
-          <h2>Welcome back</h2><p>Sign in with the account your house configured for you.</p>
+          <h2>Welcome back</h2><p>Bro,Input your login credentials.</p>
           <form id="login-form" autocomplete="on">
             <div class="field"><label for="login-username">Username</label><input id="login-username" name="username" autocomplete="username" required maxlength="32" placeholder="Your username"></div>
             <div class="field"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="Your password"></div>
             <div class="form-error" id="login-error">${escapeHtml(errorMessage)}</div>
             <button class="primary-button" type="submit">Sign in <span aria-hidden="true">→</span></button>
           </form>
-          <div class="login-hint">BalanceIT is private to the five configured roommates. Ask your house administrator for your account details.</div>
+          <div class="login-hint">BalanceIT is private to us. Five configured roommates. Ask your house fellow vibeCoder for your account details.</div>
         </div>
       </section>
     </div>`;
